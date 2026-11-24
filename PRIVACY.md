@@ -10,7 +10,9 @@ describes what it does with data on your computer.
 Audio and video files are decoded and transcribed on your computer using a
 local Whisper model. SenseMaker does not upload your recordings, extracts, or
 transcripts to a server. There is no account system and no analytics or
-telemetry.
+telemetry. ONNX Runtime (used for voice-activity detection) has optional
+telemetry; SenseMaker disables it at startup with `ORT_DISABLE_TELEMETRY=1` and
+`onnxruntime.disable_telemetry_events()`.
 
 ## Network access
 
@@ -24,6 +26,9 @@ when a model is not already cached locally:
   verified against SHA-256 checksums before use.
 - If the pinned model is already cached, SenseMaker does not need to contact
   Hugging Face.
+- Media decoding is restricted to local files. FFmpeg's network protocols are
+  disabled, so a playlist or container that references a remote URL is
+  rejected rather than fetched.
 
 ## What is stored locally
 

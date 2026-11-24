@@ -2,6 +2,9 @@
 
 Private, on-device audio transcription for Windows 10/11 (x64).
 
+> **Not releasable yet.** The current CTranslate2 wheel embeds proprietary Intel
+> oneMKL/OpenMP and NVIDIA cuDNN. Do not publish this build; see `RELEASE.md`.
+
 ## Download
 
 - `SenseMaker-Setup-1.0.0.exe` — per-user installer
@@ -19,6 +22,8 @@ that the publisher is unrecognized. You can verify the download against
 - Audio is decoded and transcribed on your computer. Nothing is uploaded.
 - SenseMaker contacts the network only to download a pinned Whisper model from
   Hugging Face when that model is not already cached locally.
+- Media decoding is restricted to local files; FFmpeg network protocols are
+  disabled. ONNX Runtime telemetry is disabled at startup.
 - Transcript history is optional. When enabled it is stored in
   `%LOCALAPPDATA%\SenseMaker` and encrypted with Windows DPAPI for your Windows
   account.
@@ -26,17 +31,17 @@ that the publisher is unrecognized. You can verify the download against
 
 ## GPU acceleration (optional)
 
-The installer is CPU-only. SenseMaker automatically uses an NVIDIA GPU when a
-CUDA runtime (cuBLAS) is already installed on the machine. The proprietary
-NVIDIA runtime is not bundled with this GPL release; see `README.md` for how to
-install it separately.
+A compliant build will be CPU-only unless the engine is replaced. The current
+CTranslate2 wheel embeds proprietary NVIDIA/Intel components and is not
+distributable; see `RELEASE.md`.
 
 ## License
 
 SenseMaker is free software licensed under the GNU General Public License,
 version 3 or later. The bundled FFmpeg libraries and their x264/x265 codecs are
-GPL-2.0-or-later; the combined Windows build is distributed under GPL-3.0-or-
-later. See `LICENSE`, `THIRD_PARTY_NOTICES.md`, and `THIRD_PARTY_SOURCE.md`.
+GPL-2.0-or-later; a compliant Windows build will be distributed under
+GPL-3.0-or-later. See `LICENSE`, `THIRD_PARTY_NOTICES.md`, and
+`THIRD_PARTY_SOURCE.md`.
 
 ## Known limitations
 

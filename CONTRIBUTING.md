@@ -25,6 +25,9 @@ For the full pinned build environment:
 
 - Keep the app dependency-light and offline-first. No telemetry, no audio
   uploads, and no cloud APIs.
+- Keep media decoding local: do not remove the FFmpeg
+  `protocol_whitelist=file` restriction or re-enable ONNX Runtime telemetry.
+- Keep log output free of transcript text and directory paths.
 - Do not introduce dependencies with licenses incompatible with
   GPL-3.0-or-later. Proprietary components must not be bundled in the
   installer; document optional user-installed components instead.

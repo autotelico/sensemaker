@@ -117,8 +117,9 @@ AUDIO_FILE_TYPES = [
         " ".join(f"*.{ext}" for ext in AUDIO_EXTENSIONS + VIDEO_EXTENSIONS),
     ),
     ("Audio files", " ".join(f"*.{ext}" for ext in AUDIO_EXTENSIONS)),
-    ("All files", "*.*"),
 ]
+
+ALLOWED_EXTENSIONS = frozenset(AUDIO_EXTENSIONS + VIDEO_EXTENSIONS)
 
 # Processed files (with their transcripts) are encrypted with Windows DPAPI.
 HISTORY_VERSION = 1
@@ -1793,6 +1794,7 @@ class TranscriberApp:
         added = 0
         duplicates = 0
         missing = 0
+        unsupported = 0
         active_paths = {
             self._path_key(job.path)
             for job in self._jobs
@@ -1803,6 +1805,9 @@ class TranscriberApp:
             path = Path(raw_path)
             if not path.is_file():
                 missing += 1
+                continue
+            if path.suffix.lower().lstrip(".") not in ALLOWED_EXTENSIONS:
+                unsupported += 1
                 continue
             key = self._path_key(path)
             if key in active_paths:
@@ -1833,9 +1838,16 @@ class TranscriberApp:
             parts.append(f"{duplicates} already in the list.")
         if missing:
             parts.append(f"{missing} could not be found.")
+        if unsupported:
+            parts.append(
+                f"{unsupported} unsupported file{'s' if unsupported != 1 else ''} skipped."
+            )
         if not parts:
             parts.append("No audio files were added.")
-        self._set_status(" ".join(parts), "warning" if missing else "muted")
+        self._set_status(
+            " ".join(parts),
+            "warning" if missing or unsupported else "muted",
+        )
 
         if start and added:
             self.start_transcription()
@@ -2440,7 +2452,11 @@ class TranscriberApp:
                 try:
                     self._handle_event(event)
                 except Exception:
-                    log.exception("Could not handle UI event %r", event)
+                    log.exception(
+                        "Could not handle UI event %s for job %s",
+                        event[0] if isinstance(event, tuple) and event else "?",
+                        event[1] if isinstance(event, tuple) and len(event) > 1 else "?",
+                    )
         except queue.Empty:
             pass
         self._poll_job = self.root.after(80, self._poll_events)

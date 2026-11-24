@@ -10,10 +10,10 @@ the `licenses` folder.
 | Component | Version | License | Notes |
 | --- | --- | --- | --- |
 | faster-whisper | 1.2.1 | MIT | Whisper implementation used by SenseMaker |
-| CTranslate2 | 4.8.5 | MIT | Inference engine |
+| CTranslate2 | 4.8.5 | MIT (project); wheel embeds proprietary Intel oneMKL/OpenMP and NVIDIA cuDNN | Inference engine; not GPL-compliant as currently packaged |
 | PyAV | 16.0.1 | BSD-3-Clause | Python bindings to FFmpeg |
 | FFmpeg | as bundled by PyAV 16.0.1 | LGPL/GPL (see below) | Audio/video decoding |
-| ONNX Runtime | 1.31.1 | MIT | Silero VAD support; includes its own ThirdPartyNotices |
+| ONNX Runtime | 1.31.1 | MIT | Silero VAD support; telemetry disabled at runtime; includes its own ThirdPartyNotices |
 | NumPy | 2.5.4 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | Numerical runtime |
 | tokenizers | 0.23.3 | Apache-2.0 | Hugging Face tokenizer |
 | Hugging Face Hub | 2.4.0 | Apache-2.0 | Model downloads |
@@ -36,14 +36,20 @@ the `licenses` folder.
 | Pillow | 13.0.0 | MIT-CMU | Build-time only; may be present in the PyInstaller bundle |
 | PyInstaller | 6.22.3 | GPL-2.0-or-later with bootloader exception | Packaging tool; exception permits distribution of non-free applications |
 
-## Optional NVIDIA component (not bundled)
+## Proprietary runtime components in the current build
 
-GPU acceleration requires NVIDIA cuBLAS, which is proprietary software and is
-not compatible with this project's GPL license. The installer therefore does
-**not** bundle cuBLAS or any other NVIDIA runtime. Users who want GPU inference
-install the NVIDIA CUDA runtime separately; that runtime remains under NVIDIA's
-license and is not part of the GPL distribution. Its license text is kept in
-`licenses/nvidia-cublas-License.txt` for reference.
+The CTranslate2 4.8.5 Windows wheel used by the current build contains
+proprietary components that are **not GPL-compatible**:
+
+- NVIDIA cuDNN (`cudnn64_9.dll`) — NVIDIA proprietary;
+- Intel OpenMP (`libiomp5md.dll`) — Intel Simplified Software License;
+- Intel oneMKL — statically linked inside `ctranslate2.dll`.
+
+The current installer therefore cannot be distributed as a GPL-3.0-or-later
+combined work. **Do not publish it.** Rebuild CTranslate2 with `-DWITH_MKL=OFF`,
+an oneDNN CPU runtime of sequential or TBB, and `-DOPENMP_RUNTIME=NONE`, and
+exclude cuDNN, before releasing a binary. The NVIDIA cuBLAS license in
+`licenses/` is retained for reference only.
 
 ## Whisper model weights
 
@@ -82,8 +88,9 @@ folder.
 
 ## Inno Setup
 
-The installer is built with Inno Setup 6.7.3. Inno Setup is free for
-non-commercial use; since version 6.5 commercial use requires a paid license.
+The installer is built with Inno Setup 6.7.x (6.7.3 locally; CI pins
+Chocolatey's 6.7.1). Inno Setup is free for non-commercial use; since version
+6.5 commercial use requires a paid license.
 SenseMaker is distributed free of charge under the GPL, so the non-commercial
 terms apply. If you sell SenseMaker or a derivative, obtain an Inno Setup
 commercial license. See `licenses/inno-setup-License.txt`.

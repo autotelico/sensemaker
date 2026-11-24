@@ -7,8 +7,9 @@ open source, and unsigned.
 
 1. **Corresponding source.** Keep `THIRD_PARTY_SOURCE.md` current. The bundled
    FFmpeg/x264/x265 sources must be obtainable for every release.
-2. **Do not bundle proprietary components.** NVIDIA cuBLAS is not GPL-compatible
-   and must stay out of the installer. GPU users install it separately.
+2. **Do not bundle proprietary components.** NVIDIA cuBLAS/cuDNN, Intel oneMKL,
+   and Intel OpenMP are not GPL-compatible. The current CTranslate2 wheel embeds
+   them; the binary is not releasable until the engine is rebuilt or replaced.
 3. **Inno Setup terms.** Free for non-commercial use. Obtain a commercial
    license if SenseMaker is sold.
 4. **Security/privacy contact.** GitHub private vulnerability reporting is the
@@ -29,16 +30,23 @@ open source, and unsigned.
 
 ```powershell
 py -3.14 -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
-.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-lock.txt
+.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-build.txt
+.venv\Scripts\python.exe -m unittest discover -s tests -v
 winget install JRSoftware.InnoSetup
 powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 ```
+
+The GitHub workflow builds with hash-pinned dependencies, runs the security
+tests, and publishes from a separate least-privilege release job. Signing is not
+part of CI; use `packaging/sign.ps1` manually or add a protected signing job.
 
 The build script:
 
 - regenerates icons and wizard artwork;
 - builds `dist\SenseMaker`;
+- refuses to package proprietary NVIDIA/Intel runtime DLLs or a CTranslate2
+  binary containing Intel oneMKL;
 - compiles `dist\SenseMaker-Setup-<version>.exe` with Inno Setup;
 - writes `dist\SHA256SUMS.txt` and `dist\release.json`.
 
@@ -85,4 +93,7 @@ Get-AuthenticodeSignature dist\SenseMaker-Setup-1.0.0.exe
 
 - No code signing certificate is installed on the build machine.
 - There is no hosted update manifest or auto-updater yet.
+- The CTranslate2 wheel still embeds Intel oneMKL, Intel OpenMP, and NVIDIA
+  cuDNN. Rebuild it with `-DWITH_MKL=OFF`, oneDNN sequential or TBB, and
+  `-DOPENMP_RUNTIME=NONE`, then rebuild the wheel before publishing a binary.
 - A full SBOM and legal review are still recommended.

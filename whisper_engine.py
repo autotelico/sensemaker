@@ -7,6 +7,8 @@ from __future__ import annotations
 import gc
 import hashlib
 import hmac
+import io
+import itertools
 import json
 import logging
 import os
@@ -16,6 +18,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import av
+import numpy as np
 
 APP_DIR = Path(__file__).resolve().parent
 RESOURCE_DIR = (
@@ -179,7 +184,18 @@ def _configure_cuda_dlls() -> list[Any]:
 # This must run before faster-whisper/ctranslate2 is imported.
 _CUDA_DLL_HANDLES = _configure_cuda_dlls()
 
+# ONNX Runtime is used by faster-whisper's VAD and supports telemetry.
+# Disable it before the first session is created.
+os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
+
 from faster_whisper import WhisperModel  # noqa: E402
+
+try:
+    import onnxruntime as _onnxruntime
+
+    _onnxruntime.disable_telemetry_events()
+except Exception:
+    pass
 
 
 class AudioFileError(RuntimeError):
@@ -238,9 +254,13 @@ class LoadedModel:
 def probe_media(path: Path) -> MediaInfo:
     """Read basic audio metadata without decoding the whole file."""
     try:
-        import av
-
-        with av.open(str(path), mode="r", metadata_errors="ignore") as container:
+        with av.open(
+            str(path),
+            mode="r",
+            metadata_errors="ignore",
+            container_options={"protocol_whitelist": "file"},
+            timeout=(10.0, 30.0),
+        ) as container:
             audio_streams = [stream for stream in container.streams if stream.type == "audio"]
             if not audio_streams:
                 raise AudioFileError("This file does not contain an audio track.")
@@ -260,6 +280,83 @@ def probe_media(path: Path) -> MediaInfo:
         raise
     except Exception as exc:
         raise AudioFileError(str(exc) or "Unsupported or unreadable audio file.") from exc
+
+
+def _ignore_invalid_frames(frames):
+    iterator = iter(frames)
+    while True:
+        try:
+            yield next(iterator)
+        except StopIteration:
+            break
+        except av.error.InvalidDataError:
+            continue
+
+
+def _group_frames(frames, num_samples: int | None = None):
+    fifo = av.audio.fifo.AudioFifo()
+    for frame in frames:
+        frame.pts = None
+        fifo.write(frame)
+        if num_samples is not None and fifo.samples >= num_samples:
+            yield fifo.read()
+    if fifo.samples > 0:
+        yield fifo.read()
+
+
+def _resample_frames(frames, resampler):
+    for frame in itertools.chain(frames, [None]):
+        yield from resampler.resample(frame)
+
+
+def _decode_audio(path: Path, sampling_rate: int = 16000) -> np.ndarray:
+    """Decode a local file to mono float32 PCM.
+
+    FFmpeg's protocol whitelist is restricted to ``file`` so a playlist or
+    container that references a network URL cannot make outbound requests.
+    """
+    resampler = av.audio.resampler.AudioResampler(
+        format="s16",
+        layout="mono",
+        rate=sampling_rate,
+    )
+    raw_buffer = io.BytesIO()
+    dtype = None
+    try:
+        with av.open(
+            str(path),
+            mode="r",
+            metadata_errors="ignore",
+            container_options={"protocol_whitelist": "file"},
+            timeout=(10.0, 30.0),
+        ) as container:
+            audio_stream = next(
+                (stream for stream in container.streams if stream.type == "audio"),
+                None,
+            )
+            if audio_stream is None:
+                raise AudioFileError("This file does not contain an audio track.")
+            frames = _ignore_invalid_frames(container.decode(audio_stream))
+            frames = _group_frames(frames, 500000)
+            frames = _resample_frames(frames, resampler)
+            for frame in frames:
+                array = frame.to_ndarray()
+                dtype = array.dtype
+                raw_buffer.write(array)
+    except AudioFileError:
+        raise
+    except Exception as exc:
+        raise AudioFileError(
+            str(exc) or "Unsupported or unreadable audio file."
+        ) from exc
+    finally:
+        del resampler
+        gc.collect()
+
+    if dtype is None:
+        raise AudioFileError("No audio frames were decoded.")
+    audio = np.frombuffer(raw_buffer.getbuffer(), dtype=dtype)
+    return audio.astype(np.float32) / 32768.0
 
 
 def looks_like_gpu_error(exc: Exception) -> bool:
@@ -464,8 +561,9 @@ class TranscriptionEngine:
         if self._loaded is None:
             raise RuntimeError("No Whisper model is loaded.")
 
+        audio = _decode_audio(path)
         segments, info = self._loaded.model.transcribe(
-            str(path),
+            audio,
             language=language,
             task="transcribe",
             beam_size=5,

@@ -246,27 +246,38 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
-_AUDIO_PATH_RE = re.compile(
-    r"(?P<prefix>[A-Za-z]:\\(?:[^\\\r\n\"']+\\)+)"
-    r"(?P<name>[^\\\r\n\"']+\.(?:wav|mp3|m4a|m4b|aac|flac|ogg|oga|opus|wma|aiff?|"
-    r"amr|ac3|mp2|mpga|mp4|m4v|mov|mkv|webm|avi|wmv|flv|mpe?g))",
-    re.IGNORECASE,
-)
+_URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s\"'<>]+", re.IGNORECASE)
+_WINDOWS_ABS_RE = re.compile(r"(?i)(?<![\w])[a-z]:[\\/][^\r\n\"'<>|:]*")
+_UNC_RE = re.compile(r"(?:\\\\|//)[^\r\n\"'<>|:]*")
+
+
+def _scrub_path(match: re.Match[str]) -> str:
+    raw = match.group(0)
+    if raw.endswith(("\\", "/")):
+        return "[path]"
+    stripped = raw.rstrip("\\/")
+    if not stripped:
+        return "[path]"
+    separator = "\\" if "\\" in stripped else "/"
+    name = re.split(r"[\\/]+", stripped)[-1]
+    if not name or "." not in name:
+        return "[path]"
+    return f"[path]{separator}{name}"
 
 
 def redact_text(text: str) -> str:
-    """Remove usernames and directory paths from log output."""
+    """Remove URLs, directory paths, and usernames from log output."""
     if not text:
         return text
-    home = str(Path.home())
-    if home:
-        text = text.replace(home, "%USERPROFILE%")
-        text = text.replace(home.replace("\\", "/"), "%USERPROFILE%")
 
-    def scrub(match: re.Match[str]) -> str:
-        return f"[path]\\{match.group('name')}"
+    text = _URL_RE.sub("[url]", text)
+    text = _WINDOWS_ABS_RE.sub(_scrub_path, text)
+    text = _UNC_RE.sub(_scrub_path, text)
 
-    return _AUDIO_PATH_RE.sub(scrub, text)
+    for home in {str(Path.home()), str(Path.home()).replace("\\", "/")}:
+        if home:
+            text = text.replace(home, "%USERPROFILE%")
+    return text
 
 
 class RedactingFormatter(logging.Formatter):

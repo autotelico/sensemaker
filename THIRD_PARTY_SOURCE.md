@@ -35,18 +35,22 @@ particular SenseMaker release, open an issue at
 https://github.com/autotelico/sensemaker/issues and we will provide it. This
 offer is valid for three years from the date the release was published.
 
-## Proprietary NVIDIA components are not bundled
+## Proprietary components in the current build
 
-The Windows installer does **not** include NVIDIA cuBLAS or any other
-proprietary NVIDIA runtime. GPU acceleration requires the user to install an
-NVIDIA CUDA runtime separately; that runtime is governed by NVIDIA's license and
-is not part of this GPL distribution. See `THIRD_PARTY_NOTICES.md`.
+The current CTranslate2 4.8.5 Windows wheel embeds Intel oneMKL and Intel
+OpenMP and bundles NVIDIA cuDNN. These are not GPL-compatible and are not part
+of a compliant SenseMaker distribution. Do not release the current binary;
+rebuild CTranslate2 without them (see `RELEASE.md`) and exclude cuDNN. The
+NVIDIA cuBLAS license in `licenses/` is retained for reference only. See
+`THIRD_PARTY_NOTICES.md`.
 
 ## Other components
 
 Licenses for Python, PyInstaller, CTranslate2, faster-whisper, ONNX Runtime,
-NumPy, Tcl/Tk, and the other dependencies are in the `licenses` folder. Those
-components are GPL-compatible; consult their upstream projects for source code.
+NumPy, Tcl/Tk, and the other dependencies are in the `licenses` folder. Their
+project licenses are GPL-compatible as listed; the CTranslate2 binary must be
+rebuilt without its proprietary runtime components before distribution. Consult
+the upstream projects for source code.
 
 This document is an inventory and compliance aid, not legal advice. If you
 redistribute SenseMaker or a modified build, review the obligations of

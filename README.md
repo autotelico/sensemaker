@@ -8,13 +8,20 @@ It uses OpenAI's Whisper models through `faster-whisper`; audio is processed
 locally and is never uploaded. It is free software under
 [GPL-3.0-or-later](LICENSE).
 
+> **Release status:** the source is GPL-3.0-or-later, but no compliant binary is
+> published yet. The current CTranslate2 wheel embeds proprietary Intel
+> oneMKL/OpenMP and NVIDIA cuDNN, so the installer must not be distributed until
+> the engine is rebuilt. See `RELEASE.md`.
+
 ![SenseMaker demo](demo/SenseMaker-demo-poster.png)
 
 ## Download
 
-Get the latest installer from the [Releases page](https://github.com/autotelico/sensemaker/releases).
-The current build is unsigned, so Windows SmartScreen may warn that the
-publisher is unrecognized. Verify downloads against `SHA256SUMS.txt`.
+No binary release is published yet. When a compliant build is available it will
+appear on the [Releases page](https://github.com/autotelico/sensemaker/releases).
+Builds will be unsigned unless a certificate is supplied, so Windows SmartScreen
+may warn that the publisher is unrecognized; verify downloads against
+`SHA256SUMS.txt`.
 
 Building from source is described below.
 
@@ -29,9 +36,9 @@ SenseMaker is installed as a normal per-user Windows application:
 - **Uninstall:** Settings → Apps → Installed apps → SenseMaker
 
 The installer is CPU-only. SenseMaker uses an NVIDIA GPU automatically when a
-CUDA runtime (cuBLAS) is already installed on the machine. NVIDIA's proprietary
-runtime is not bundled, because it is not compatible with this project's GPL
-license; see [GPU acceleration](#gpu-acceleration) below.
+CUDA runtime is already installed on the machine. The current CTranslate2 wheel
+still embeds proprietary NVIDIA/Intel components, so this build is not yet
+distributable; see [GPU acceleration](#gpu-acceleration) and `RELEASE.md`.
 
 Installed app data lives in `%LOCALAPPDATA%\SenseMaker`:
 
@@ -49,7 +56,8 @@ is about 480 MB.
 
 Audio and transcripts are processed locally. Model downloads contact Hugging
 Face using only ordinary network metadata and the model name; no audio or
-transcript content is sent.
+transcript content is sent. Media decoding is restricted to the local file
+protocol, and ONNX Runtime telemetry is disabled at startup.
 
 The **Privacy** link in the audio-library footer opens the privacy and history
 controls:
@@ -100,8 +108,9 @@ Use a clean virtual environment for release builds:
 
 ```powershell
 py -3.14 -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
-.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-lock.txt
+.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-build.txt
+.venv\Scripts\python.exe -m unittest discover -s tests -v
 winget install JRSoftware.InnoSetup
 powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 ```
@@ -125,7 +134,7 @@ powershell -ExecutionPolicy Bypass -File packaging\build.ps1 `
 
 The app and installer are **unsigned until a certificate is supplied**. See
 `RELEASE.md` for the publication checklist and outstanding blockers, including
-the FFmpeg/GPL licensing question.
+the proprietary CTranslate2 runtime.
 
 Rebuilding just the installer while keeping the existing app build:
 
@@ -147,10 +156,11 @@ load a model that is missing from the manifest or fails verification.
 
 ## GPU acceleration
 
-The installer does not bundle NVIDIA's proprietary runtime. To use a GPU,
-install a CUDA runtime separately — for example the NVIDIA CUDA Toolkit, or the
-`nvidia-cublas-cu12` and `nvidia-cuda-nvrtc-cu12` packages when running from
-source. SenseMaker looks for cuBLAS in:
+A GPL-compliant CPU build will not bundle NVIDIA's proprietary runtime. To use a
+GPU, install a CUDA runtime separately — for example the NVIDIA CUDA Toolkit, or
+the `nvidia-cublas-cu12` and `nvidia-cuda-nvrtc-cu12` packages when running from
+source. The current build is not GPL-compliant because CTranslate2 embeds Intel
+oneMKL/OpenMP and NVIDIA cuDNN; see `RELEASE.md`. SenseMaker looks for cuBLAS in:
 
 - `SENSEMAKER_GPU_DIR`
 - `gpu\cublas\bin` next to the executable

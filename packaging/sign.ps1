@@ -42,7 +42,7 @@ if ($PSCmdlet.ParameterSetName -eq 'Pfx') {
     $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
         (Resolve-Path $PfxPath).Path,
         $PfxPassword,
-        [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::DefaultKeySet
+        [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
     )
     $Signing = $true
 }
@@ -66,23 +66,28 @@ if (-not $cert.HasPrivateKey) {
     throw 'The signing certificate does not have a private key.'
 }
 
-foreach ($file in $FilePaths) {
-    if (-not (Test-Path $file)) {
-        throw "File to sign was not found: $file"
+try {
+    foreach ($file in $FilePaths) {
+        if (-not (Test-Path $file)) {
+            throw "File to sign was not found: $file"
+        }
+        $resolved = (Resolve-Path $file).Path
+        Write-Host "Signing $resolved"
+        $result = Set-AuthenticodeSignature -FilePath $resolved -Certificate $cert `
+            -TimestampServer $TimestampUrl -HashAlgorithm SHA256
+        if ($result.Status -ne 'Valid') {
+            throw "Signing did not produce a valid signature for $resolved (status: $($result.Status))."
+        }
     }
-    $resolved = (Resolve-Path $file).Path
-    Write-Host "Signing $resolved"
-    $result = Set-AuthenticodeSignature -FilePath $resolved -Certificate $cert `
-        -TimestampServer $TimestampUrl -HashAlgorithm SHA256
-    if ($result.Status -ne 'Valid') {
-        throw "Signing did not produce a valid signature for $resolved (status: $($result.Status))."
+
+    foreach ($file in $FilePaths) {
+        $signature = Get-AuthenticodeSignature (Resolve-Path $file)
+        Write-Host ("{0}: {1}" -f $file, $signature.Status)
+        if ($signature.Status -ne 'Valid') {
+            throw "Signature verification failed for $file."
+        }
     }
 }
-
-foreach ($file in $FilePaths) {
-    $signature = Get-AuthenticodeSignature (Resolve-Path $file)
-    Write-Host ("{0}: {1}" -f $file, $signature.Status)
-    if ($signature.Status -ne 'Valid') {
-        throw "Signature verification failed for $file."
-    }
+finally {
+    $cert.Dispose()
 }

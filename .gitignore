@@ -22,4 +22,14 @@ settings.json
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.pfx
+*.p12
+*.pem
+*.key
+*.cer
+*.crt
+.env
+.env.*
+id_rsa*
+secrets.*
 CONTINUE.md

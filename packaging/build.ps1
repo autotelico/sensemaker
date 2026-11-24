@@ -73,6 +73,27 @@ if (-not $SkipAppBuild) {
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
 }
 
+# Refuse to package proprietary runtimes. The current CTranslate2 wheel embeds
+# Intel oneMKL/OpenMP and NVIDIA cuDNN; the binary is not GPL-compliant until
+# the engine is rebuilt. See RELEASE.md.
+$ProprietaryDlls = Get-ChildItem -Path 'dist\SenseMaker' -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.Name -match '^(cudnn|cublas|cudart|nvrtc).*\.dll$' -or
+        $_.Name -ieq 'libiomp5md.dll'
+    }
+if ($ProprietaryDlls) {
+    $names = ($ProprietaryDlls | Select-Object -ExpandProperty FullName) -join ', '
+    throw "Refusing to build: proprietary runtime DLLs were collected: $names. See RELEASE.md."
+}
+$CTranslate = Join-Path $Root 'dist\SenseMaker\_internal\ctranslate2\ctranslate2.dll'
+if (Test-Path $CTranslate) {
+    $bytes = [IO.File]::ReadAllBytes($CTranslate)
+    $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+    if ($ascii.Contains('oneMKL') -or $ascii.Contains('CT2_USE_MKL')) {
+        throw "Refusing to build: ctranslate2.dll statically contains Intel oneMKL. See RELEASE.md."
+    }
+}
+
 if ($DoSign) {
     & (Join-Path $PSScriptRoot 'sign.ps1') -FilePaths 'dist\SenseMaker\SenseMaker.exe' @SignArgs
     if ($LASTEXITCODE -ne 0) { throw "Application signing failed." }
