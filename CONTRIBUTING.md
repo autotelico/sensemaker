@@ -1,0 +1,39 @@
+# Contributing to SenseMaker
+
+Thanks for helping. SenseMaker is free software under
+`GPL-3.0-or-later`; by contributing you agree that your changes are licensed
+under the same terms.
+
+## Development
+
+Requirements: Windows 10/11 x64 and Python 3.14.
+
+```powershell
+py -3.14 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe app.pyw
+```
+
+For the full pinned build environment:
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+```
+
+## Guidelines
+
+- Keep the app dependency-light and offline-first. No telemetry, no audio
+  uploads, and no cloud APIs.
+- Do not introduce dependencies with licenses incompatible with
+  GPL-3.0-or-later. Proprietary components must not be bundled in the
+  installer; document optional user-installed components instead.
+- Update `THIRD_PARTY_NOTICES.md` and `licenses/` when adding a dependency.
+- Keep Windows-specific paths and installer behavior covered by
+  `packaging/build.ps1` and `packaging/SenseMaker.iss`.
+- Run the app from source before opening a pull request.
+
+## Security reports
+
+Do not open a public issue for a vulnerability. Use the private reporting link
+in `SECURITY.md`.

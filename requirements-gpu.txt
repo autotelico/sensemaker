@@ -1,0 +1,7 @@
+# Optional NVIDIA CUDA runtime for running from source or testing GPU support.
+# CTranslate2's Whisper path needs cuBLAS; it does not need the much larger
+# cuDNN package. These proprietary components are NOT bundled in the GPL
+# installer; end users install an NVIDIA CUDA runtime separately.
+-r requirements.txt
+nvidia-cublas-cu12==12.9.2.10; sys_platform == "win32"
+nvidia-cuda-nvrtc-cu12==12.9.86; sys_platform == "win32"
