@@ -22,6 +22,25 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+
+def _ensure_standard_streams() -> None:
+    """Give libraries a writable stream in console-less windowed builds.
+
+    ``pythonw`` and PyInstaller's windowed mode leave ``sys.stdout`` and
+    ``sys.stderr`` as ``None``. Model downloads use progress bars that write to
+    stderr, which otherwise fails with "NoneType object has no attribute
+    'write'" on the first download of a model.
+    """
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name) is None:
+            try:
+                setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+            except OSError:
+                pass
+
+
+_ensure_standard_streams()
+
 from audio_capture import list_input_devices
 from global_hotkey import GlobalHotkey
 from secure_store import (
@@ -49,7 +68,12 @@ from whisper_engine import (
     language_name,
     looks_like_gpu_error,
 )
-from live_transcription import LiveTranscriber, join_transcript, start_new_take
+from live_transcription import (
+    LiveTranscriber,
+    clean_transcript_text,
+    join_transcript,
+    start_new_take,
+)
 
 APP_NAME = "SenseMaker"
 SETTINGS_PATH = DATA_DIR / SETTINGS_FILENAME
@@ -149,6 +173,7 @@ class AudioJob:
     added_at: float = field(default_factory=time.time)
     size: int = 0
     kind: str = "file"  # file | live
+    engine: str = ""
 
     @property
     def name(self) -> str:
@@ -175,6 +200,7 @@ class AudioJob:
             "name": self.name,
             "path": "" if self.kind == "live" else str(self.path),
             "kind": self.kind,
+            "engine": self.engine,
             "transcript": self.transcript,
             "language": self.language,
             "duration": self.duration,
@@ -252,6 +278,7 @@ class AudioJob:
             added_at=number("added_at") or completed_at or time.time(),
             size=int(number("size") or 0),
             kind=kind,
+            engine=text("engine") or "",
         )
 
 
@@ -352,7 +379,10 @@ class TranscriberApp:
         self._popup_window: tk.Toplevel | None = None
         self._popup_text: tk.Text | None = None
         self._popup_primary: ttk.Button | None = None
+        self._popup_continue_btn: ttk.Button | None = None
         self._popup_copy_btn: ttk.Button | None = None
+        self._popup_model_combo: ttk.Combobox | None = None
+        self._popup_language_combo: ttk.Combobox | None = None
         self._popup_status_label: tk.Label | None = None
         self._popup_status_var: tk.StringVar | None = None
         self._popup_dot: tk.Canvas | None = None
@@ -373,6 +403,20 @@ class TranscriberApp:
         self._hotkey: GlobalHotkey | None = None
         self._hotkey_label: str | None = None
         self._quick_link: tk.Label | None = None
+        self._model_download_active = False
+        self._model_download_key: str | None = None
+        self._model_download_thread: threading.Thread | None = None
+        self._model_status_var = tk.StringVar(value="")
+        self._model_status_label: tk.Label | None = None
+        self._download_btn: ttk.Button | None = None
+        self._models_link: tk.Label | None = None
+        self._engine_status_var = tk.StringVar(value="")
+        self._engine_status_label: tk.Label | None = None
+        self._ollama_refresh_link: tk.Label | None = None
+        self._popup_engine_status_var: tk.StringVar | None = None
+        self._popup_engine_status_label: tk.Label | None = None
+        self._popup_model_status_var: tk.StringVar | None = None
+        self._popup_model_status_label: tk.Label | None = None
         self._history = HistoryStore(DATA_DIR)
         self._retain_history = True
         self._history_error: str | None = None
@@ -382,6 +426,7 @@ class TranscriberApp:
 
         self.model_labels = [MODEL_LABELS[key] for key, _, _ in MODEL_OPTIONS]
         self.model_key_by_label = {MODEL_LABELS[key]: key for key, _, _ in MODEL_OPTIONS}
+        self.model_size_by_key = {key: size for key, _, size in MODEL_OPTIONS}
         self.language_codes = dict(LANGUAGE_OPTIONS)
 
         self.model_var = tk.StringVar(value=MODEL_LABELS[DEFAULT_MODEL])
@@ -413,6 +458,9 @@ class TranscriberApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._poll_job = self.root.after(80, self._poll_events)
         self._start_global_hotkey()
+        self._refresh_model_status()
+        self.engine.refresh_ollama(force=True)
+        self._refresh_engine_status()
 
     # --- Layout helpers ------------------------------------------------------
     def px(self, value: float) -> int:
@@ -633,7 +681,9 @@ class TranscriberApp:
         self.root.option_add("*TCombobox*Listbox.foreground", TEXT)
         self.root.option_add("*TCombobox*Listbox.selectBackground", ACCENT_SOFT)
         self.root.option_add("*TCombobox*Listbox.selectForeground", TEXT)
-        self.root.option_add("*TCombobox*Listbox.font", "Segoe UI 10")
+        # A font family with a space must be a proper Tcl list here; a plain
+        # "Segoe UI 10" string makes Tk's combobox popdown fail to open.
+        self.root.option_add("*TCombobox*Listbox.font", ("Segoe UI", 10))
         self.root.option_add("*TCombobox*Listbox.borderWidth", 0)
 
     def _card(self, parent: tk.Misc) -> tk.Frame:
@@ -1107,7 +1157,9 @@ class TranscriberApp:
                 "audio, and transcripts are not uploaded. Model files are downloaded "
                 "from Hugging Face; those requests include network metadata and the "
                 "model name, but never audio or transcript content. Live microphone "
-                "audio is transcribed in memory and never written to disk.\n\n"
+                "audio is transcribed in memory and never written to disk. If a local "
+                "audio-capable Ollama model is used, audio goes only to the loopback "
+                "Ollama server on this computer.\n\n"
                 "When history is on, completed transcripts (including live sessions) "
                 "and source references are encrypted with Windows DPAPI and readable by "
                 "this Windows account. Quick dictation popups are never saved to "
@@ -1567,7 +1619,7 @@ class TranscriberApp:
             "font": ("Segoe UI", 8, "bold"),
             "anchor": "w",
         }
-        tk.Label(inner, text="MODEL", **label_opts).grid(
+        tk.Label(inner, text="WHISPER MODEL", **label_opts).grid(
             row=0, column=0, sticky="w", padx=(0, self.px(12))
         )
         tk.Label(inner, text="LANGUAGE", **label_opts).grid(
@@ -1588,6 +1640,9 @@ class TranscriberApp:
         )
         self.model_combo.grid(
             row=1, column=0, sticky="ew", padx=(0, self.px(12)), pady=(self.px(6), 0)
+        )
+        self.model_combo.bind(
+            "<<ComboboxSelected>>", self._on_model_selection_changed
         )
 
         self.language_combo = ttk.Combobox(
@@ -1618,6 +1673,79 @@ class TranscriberApp:
             pady=(self.px(6), 0),
         )
 
+        status_row = tk.Frame(inner, bg=SURFACE)
+        status_row.grid(
+            row=2, column=0, columnspan=3, sticky="ew", pady=(self.px(9), 0)
+        )
+        self._model_status_label = tk.Label(
+            status_row,
+            textvariable=self._model_status_var,
+            bg=SURFACE,
+            fg=MUTED,
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify="left",
+        )
+        self._model_status_label.pack(side="left", fill="x", expand=True)
+        self._download_btn = ttk.Button(
+            status_row,
+            text="Download model",
+            style="SmallSecondary.TButton",
+            command=self._download_selected_model,
+            cursor="hand2",
+            state=["disabled"],
+        )
+        self._download_btn.pack(side="right")
+        self._models_link = tk.Label(
+            status_row,
+            text="Open models folder",
+            bg=SURFACE,
+            fg=MUTED,
+            font=("Segoe UI", 8, "underline"),
+            cursor="hand2",
+        )
+        self._models_link.pack(side="right", padx=(0, self.px(12)))
+        self._models_link.bind(
+            "<Button-1>", lambda _event: self._open_models_folder()
+        )
+
+        engine_row = tk.Frame(inner, bg=SURFACE)
+        engine_row.grid(
+            row=3, column=0, columnspan=3, sticky="ew", pady=(self.px(9), 0)
+        )
+        tk.Label(
+            engine_row,
+            text="SPEECH ENGINE",
+            bg=SURFACE,
+            fg=MUTED,
+            font=("Segoe UI", 8, "bold"),
+            anchor="w",
+        ).pack(side="left")
+        self._engine_status_label = tk.Label(
+            engine_row,
+            textvariable=self._engine_status_var,
+            bg=SURFACE,
+            fg=MUTED,
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify="left",
+        )
+        self._engine_status_label.pack(
+            side="left", padx=(self.px(10), 0), fill="x", expand=True
+        )
+        self._ollama_refresh_link = tk.Label(
+            engine_row,
+            text="Refresh",
+            bg=SURFACE,
+            fg=ACCENT,
+            font=("Segoe UI", 8, "underline"),
+            cursor="hand2",
+        )
+        self._ollama_refresh_link.pack(side="right")
+        self._ollama_refresh_link.bind(
+            "<Button-1>", lambda _event: self._refresh_engine()
+        )
+
         tk.Label(
             inner,
             text=(
@@ -1629,12 +1757,308 @@ class TranscriberApp:
             font=("Segoe UI", 9),
             anchor="w",
         ).grid(
-            row=2,
+            row=4,
             column=0,
             columnspan=3,
             sticky="w",
             pady=(self.px(10), 0),
         )
+
+    # --- Model availability --------------------------------------------------
+    def _selected_model_key(self) -> str:
+        return self.model_key_by_label.get(self.model_var.get(), DEFAULT_MODEL)
+
+    def _on_model_selection_changed(self, _event: tk.Event | None = None) -> None:
+        self._refresh_model_status()
+
+    def _model_label(self, model_key: str) -> str:
+        name = MODEL_NAMES.get(model_key, model_key)
+        size = self.model_size_by_key.get(model_key, "")
+        return f"{name} ({size})" if size else name
+
+    def _set_model_selection_enabled(self, enabled: bool) -> None:
+        state = ["!disabled", "readonly"] if enabled else ["disabled"]
+        self.model_combo.state(state)
+        if self._popup_model_combo is not None:
+            self._popup_model_combo.state(state)
+
+    def _refresh_model_status(self) -> None:
+        key = (
+            self._model_download_key
+            if self._model_download_active and self._model_download_key
+            else self._selected_model_key()
+        )
+        label = self._model_label(key)
+        ready = (
+            not self._model_download_active and self.engine.model_ready(key)
+        )
+
+        if self._model_download_active:
+            text = f"Downloading {label}."
+            tone = ACCENT
+            self._set_model_selection_enabled(False)
+        elif ready:
+            text = f"{label} is ready."
+            tone = SUCCESS
+        else:
+            text = f"{label} is not downloaded."
+            tone = WARNING
+
+        self._model_status_var.set(text)
+        if self._model_status_label is not None:
+            self._model_status_label.configure(fg=tone)
+        if self._download_btn is not None:
+            if self._model_download_active:
+                self._download_btn.configure(text="Downloading")
+                self._download_btn.state(["disabled"])
+            elif ready:
+                self._download_btn.configure(text="Downloaded")
+                self._download_btn.state(["disabled"])
+            else:
+                self._download_btn.configure(text="Download model")
+                self._download_btn.state(["!disabled"])
+
+        if (
+            self._popup_model_status_label is not None
+            and self._popup_model_status_var is not None
+        ):
+            if self._model_download_active:
+                popup_text = f"Downloading {label}"
+                popup_fg = ACCENT
+                clickable = False
+            elif ready:
+                popup_text = f"{label} · ready"
+                popup_fg = SUCCESS
+                clickable = False
+            else:
+                popup_text = f"{label} · not downloaded — click to download"
+                popup_fg = WARNING
+                clickable = True
+            self._popup_model_status_var.set(popup_text)
+            self._popup_model_status_label.configure(
+                fg=popup_fg,
+                cursor="hand2" if clickable else "arrow",
+                font=(
+                    ("Segoe UI", 8, "underline")
+                    if clickable
+                    else ("Segoe UI", 8)
+                ),
+            )
+
+    def _download_selected_model(self) -> None:
+        self._start_model_download(self._selected_model_key())
+
+    def _refresh_engine_status(self) -> None:
+        discovery = self.engine.ollama
+        if discovery.selected:
+            engine_text = f"Ollama · {discovery.selected}"
+            tone = SUCCESS
+            popup_text = f"Engine: Ollama · {discovery.selected}"
+        else:
+            reason = discovery.error or "Ollama is not available"
+            engine_text = f"Whisper · {reason}"
+            tone = MUTED
+            popup_text = "Engine: Whisper"
+        self._engine_status_var.set(engine_text)
+        if self._engine_status_label is not None:
+            self._engine_status_label.configure(fg=tone)
+        if (
+            self._popup_engine_status_label is not None
+            and self._popup_engine_status_var is not None
+        ):
+            self._popup_engine_status_var.set(popup_text)
+            self._popup_engine_status_label.configure(
+                fg=SUCCESS if discovery.selected else MUTED
+            )
+
+    def _refresh_engine(self) -> None:
+        if self._busy or self._live_active or self._popup_active:
+            self._set_status(
+                "Wait for the current transcription to finish before "
+                "refreshing the engine.",
+                "warning",
+            )
+            return
+        self._set_status("Checking the local Ollama server.", "accent")
+        self.root.update_idletasks()
+        discovery = self.engine.refresh_ollama(force=True)
+        self._refresh_engine_status()
+        if discovery.selected:
+            self._set_status(
+                f"Speech engine: Ollama · {discovery.selected}.", "success"
+            )
+        else:
+            reason = discovery.error or "no audio-capable model"
+            self._set_status(f"Speech engine: Whisper ({reason}).", "muted")
+
+    def _open_models_folder(self) -> None:
+        folder = self.engine.models_dir
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if hasattr(os, "startfile"):
+                os.startfile(str(folder))  # type: ignore[attr-defined]
+            else:
+                import subprocess
+
+                subprocess.Popen(["xdg-open", str(folder)])
+        except Exception:
+            log.exception("Could not open the models folder")
+            self._set_status(
+                f"Could not open the models folder:\n{folder}", "error"
+            )
+            return
+        self._set_status(f"Models folder: {folder}", "muted")
+
+    def _ensure_model_available(self, model_key: str, parent=None) -> bool:
+        if self.engine.using_ollama:
+            return True
+        if self._model_download_active:
+            self._set_status("A model download is already running.", "warning")
+            return False
+        if self.engine.model_ready(model_key):
+            return True
+        name = MODEL_NAMES.get(model_key, model_key)
+        size = self.model_size_by_key.get(model_key, "")
+        label = f"{name} model ({size})" if size else f"{name} model"
+        download = messagebox.askyesno(
+            APP_NAME,
+            f"The {label} is not downloaded yet.\n\n"
+            "Download it now? SenseMaker can stay open while it downloads. "
+            "Try again when the download finishes.",
+            parent=parent or self.root,
+        )
+        if not download:
+            self._set_status(f"The {name} model is not downloaded.", "warning")
+            return False
+        self._start_model_download(model_key)
+        return False
+
+    def _start_model_download(self, model_key: str) -> None:
+        if self._model_download_active:
+            self._set_status("A model download is already running.", "warning")
+            self._refresh_model_status()
+            return
+        if self._busy or self._live_active or self._popup_active:
+            self._set_status(
+                "Wait for the current transcription to finish before "
+                "downloading a model.",
+                "warning",
+            )
+            return
+        if self.engine.model_ready(model_key):
+            self._refresh_model_status()
+            self._set_status("The selected model is already downloaded.", "muted")
+            return
+
+        self._model_download_active = True
+        self._model_download_key = model_key
+        self._set_model_selection_enabled(False)
+        self.live_btn.state(["disabled"])
+        name = MODEL_NAMES.get(model_key, model_key)
+        size = self.model_size_by_key.get(model_key, "")
+        detail = f" ({size})" if size else ""
+        self._set_status(f"Downloading the {name} model{detail}.", "accent")
+        self._refresh_model_status()
+        self._update_action_button()
+        self._update_transcript_buttons()
+        self._update_popup_controls()
+        self._start_indeterminate()
+        self._model_download_thread = threading.Thread(
+            target=self._model_download_worker,
+            args=(model_key,),
+            daemon=True,
+            name="sense-maker-model-download",
+        )
+        self._model_download_thread.start()
+
+    def _model_download_worker(self, model_key: str) -> None:
+        try:
+            path = self.engine.ensure_model(model_key)
+        except Exception as exc:
+            details = traceback.format_exc()
+            self.events.put(
+                (
+                    "model_download_error",
+                    model_key,
+                    str(exc).strip() or type(exc).__name__,
+                    details,
+                )
+            )
+            return
+        self.events.put(("model_download_done", model_key, str(path)))
+
+    def _on_model_download_done(self, model_key: str, _path: str) -> None:
+        self._model_download_active = False
+        self._model_download_key = None
+        self._model_download_thread = None
+        self._set_model_selection_enabled(True)
+        self.live_btn.state(["!disabled"])
+        self._reset_progress()
+        self._refresh_model_status()
+        self._update_action_button()
+        self._update_transcript_buttons()
+        self._update_popup_controls()
+        name = MODEL_NAMES.get(model_key, model_key)
+        self._set_status(
+            f"The {name} model is downloaded and verified.", "success"
+        )
+        if (
+            self._popup_window is not None
+            and not self._popup_active
+            and not self._popup_text_content().strip()
+        ):
+            self._set_popup_status(
+                f"{name} is ready. Press Start to dictate.", "success"
+            )
+            self._update_popup_controls()
+
+    def _on_model_download_error(
+        self, model_key: str, message: str, details: str
+    ) -> None:
+        self._model_download_active = False
+        self._model_download_key = None
+        self._model_download_thread = None
+        self._set_model_selection_enabled(True)
+        self.live_btn.state(["!disabled"])
+        self._reset_progress()
+        self._refresh_model_status()
+        self._update_action_button()
+        self._update_transcript_buttons()
+        self._update_popup_controls()
+        name = MODEL_NAMES.get(model_key, model_key)
+        self._set_status(f"Could not download the {name} model.", "error")
+        log.error("Model download failed for %s:\n%s", model_key, details)
+        if self._popup_window is not None and not self._popup_active:
+            self._set_popup_status(
+                f"Could not download {name}. Click the download link to retry.",
+                "error",
+            )
+            self._update_popup_controls()
+        messagebox.showerror(
+            APP_NAME,
+            f"Could not download the {name} model.\n\n{message}\n\n"
+            f"The full details were saved to:\n{LOG_PATH}",
+            parent=self._popup_window or self.root,
+        )
+
+    def _on_popup_model_status_click(
+        self, _event: tk.Event | None = None
+    ) -> None:
+        if (
+            self._popup_window is None
+            or self._popup_active
+            or self._model_download_active
+        ):
+            return
+        key = self._selected_model_key()
+        if self.engine.model_ready(key):
+            return
+        if self._busy or self._live_active:
+            self._set_popup_status(
+                "Wait for the current transcription to finish.", "warning"
+            )
+            return
+        self._start_model_download(key)
 
     def _build_action_bar(self, parent: tk.Frame) -> None:
         bar = tk.Frame(parent, bg=BG)
@@ -2137,7 +2561,9 @@ class TranscriberApp:
                 bits.append(language_name(job.language))
             if job.words:
                 bits.append(f"{job.words:,} words")
-            if job.model_key:
+            if job.engine:
+                bits.append(job.engine.replace(" · ", ": "))
+            elif job.model_key:
                 bits.append(MODEL_NAMES.get(job.model_key, job.model_key))
             if job.elapsed is not None:
                 bits.append(f"in {_format_elapsed(job.elapsed)}")
@@ -2184,6 +2610,7 @@ class TranscriberApp:
             and not self._busy
             and not self._live_active
             and not self._popup_active
+            and not self._model_download_active
             and job.status in ("error", "cancelled")
             and job.exists
         )
@@ -2362,10 +2789,10 @@ class TranscriberApp:
             self.cancel_btn.state(["!disabled"])
         else:
             self.add_btn.state(["!disabled"])
-            self.model_combo.state(["readonly"])
-            self.language_combo.state(["readonly"])
+            self.model_combo.state(["!disabled", "readonly"])
+            self.language_combo.state(["!disabled", "readonly"])
             self.timestamps_check.state(["!disabled"])
-            self.mic_combo.state(["readonly"])
+            self.mic_combo.state(["!disabled", "readonly"])
             self.live_btn.state(["!disabled"])
             self.cancel_btn.grid_remove()
             self.cancel_btn.state(["!disabled"])
@@ -2379,6 +2806,10 @@ class TranscriberApp:
             return
         if self._popup_active:
             self.transcribe_btn.configure(text="Quick dictation running")
+            self.transcribe_btn.state(["disabled"])
+            return
+        if self._model_download_active:
+            self.transcribe_btn.configure(text="Downloading model")
             self.transcribe_btn.state(["disabled"])
             return
         if self._busy:
@@ -2398,6 +2829,9 @@ class TranscriberApp:
     def start_transcription(self) -> None:
         if self._busy or self._live_active or self._popup_active:
             return
+        if self._model_download_active:
+            self._set_status("Wait for the model download to finish.", "warning")
+            return
         queued = [job.id for job in self._ordered_jobs() if job.status == "queued"]
         if not queued:
             if not self._jobs:
@@ -2408,11 +2842,19 @@ class TranscriberApp:
     def _start_batch(self, job_ids: list[str]) -> None:
         if self._busy or self._live_active or self._popup_active:
             return
+        if self._model_download_active:
+            self._set_status("Wait for the model download to finish.", "warning")
+            return
         ids = [job_id for job_id in job_ids if job_id in self._jobs_by_id]
         if not ids:
             return
 
+        self.engine.refresh_ollama(force=False)
+        self._refresh_engine_status()
+        use_ollama = self.engine.using_ollama
         model_key = self.model_key_by_label.get(self.model_var.get(), DEFAULT_MODEL)
+        if not use_ollama and not self._ensure_model_available(model_key):
+            return
         language = self.language_codes.get(self.language_var.get())
         timestamps = self.timestamps_var.get()
 
@@ -2436,6 +2878,7 @@ class TranscriberApp:
             job.elapsed = None
             job.completed_at = None
             job.model_key = model_key
+            job.engine = self.engine.backend_label if use_ollama else ""
             job.timestamps = timestamps
             specs.append((job.id, job.path, job.name))
 
@@ -2467,36 +2910,52 @@ class TranscriberApp:
         loaded = None
         total = len(specs)
         model_name = MODEL_NAMES.get(model_key, model_key)
+        use_ollama = self.engine.using_ollama
+        device_label = self.engine.backend_label if use_ollama else ""
 
-        self.events.put(
-            (
-                "status",
-                f"Loading the {model_name} model… first use may download it.",
-                "accent",
+        if use_ollama:
+            self.events.put(
+                ("status", f"Transcribing with {device_label}.", "accent")
             )
-        )
-        self.events.put(("progress_mode", "indeterminate"))
+            self.events.put(("progress_mode", "determinate"))
+            self.events.put(("device", device_label))
+        else:
+            self.events.put(
+                (
+                    "status",
+                    f"Loading the {model_name} model.",
+                    "accent",
+                )
+            )
+            self.events.put(("progress_mode", "indeterminate"))
 
-        while True:
-            try:
-                loaded = self.engine.load_model(model_key, force_cpu=force_cpu)
-                break
-            except Exception as exc:
-                if not force_cpu and looks_like_gpu_error(exc):
-                    log.exception("GPU model load failed; retrying on CPU")
-                    self.engine.block_gpu()
-                    self.events.put(
-                        ("notice", "GPU unavailable — retrying on the CPU.", "warning")
+            while True:
+                try:
+                    loaded = self.engine.load_model(
+                        model_key, force_cpu=force_cpu
                     )
-                    force_cpu = True
-                    continue
-                details = traceback.format_exc()
-                log.error("Could not load the Whisper model\n%s", details)
-                message = str(exc).strip() or type(exc).__name__
-                self.events.put(("batch_error", message, details))
-                return
+                    break
+                except Exception as exc:
+                    if not force_cpu and looks_like_gpu_error(exc):
+                        log.exception("GPU model load failed; retrying on CPU")
+                        self.engine.block_gpu()
+                        self.events.put(
+                            (
+                                "notice",
+                                "GPU unavailable — retrying on the CPU.",
+                                "warning",
+                            )
+                        )
+                        force_cpu = True
+                        continue
+                    details = traceback.format_exc()
+                    log.error("Could not load the Whisper model\n%s", details)
+                    message = str(exc).strip() or type(exc).__name__
+                    self.events.put(("batch_error", message, details))
+                    return
 
-        self.events.put(("device", loaded.device_label))
+            device_label = loaded.device_label
+            self.events.put(("device", device_label))
         if self.cancel_event is not None and self.cancel_event.is_set():
             self.events.put(("batch_cancelled", 0, 0, 0))
             return
@@ -2550,7 +3009,7 @@ class TranscriberApp:
                                 ("batch_cancelled", index, done_count, failed_count)
                             )
                             return
-                        text = segment.text.strip()
+                        text = clean_transcript_text(segment.text)
                         if text:
                             emitted += 1
                             self.events.put(
@@ -2572,7 +3031,7 @@ class TranscriberApp:
                             total,
                             time.monotonic() - file_started,
                             emitted,
-                            loaded.device_label,
+                            device_label,
                         )
                     )
                     done_count += 1
@@ -2601,7 +3060,8 @@ class TranscriberApp:
                             loaded = self.engine.load_model(
                                 model_key, force_cpu=True
                             )
-                            self.events.put(("device", loaded.device_label))
+                            device_label = loaded.device_label
+                            self.events.put(("device", device_label))
                         except Exception:
                             details = traceback.format_exc()
                             log.error("Could not reload the model on the CPU\n%s", details)
@@ -2648,7 +3108,7 @@ class TranscriberApp:
                 time.monotonic() - started,
                 done_count,
                 failed_count,
-                loaded.device_label if loaded else "",
+                device_label,
             )
         )
 
@@ -2662,7 +3122,15 @@ class TranscriberApp:
     def start_live(self) -> None:
         if self._busy or self._live_active or self._popup_active:
             return
+        if self._model_download_active:
+            self._set_status("Wait for the model download to finish.", "warning")
+            return
+        self.engine.refresh_ollama(force=False)
+        self._refresh_engine_status()
+        use_ollama = self.engine.using_ollama
         model_key = self.model_key_by_label.get(self.model_var.get(), DEFAULT_MODEL)
+        if not use_ollama and not self._ensure_model_available(model_key):
+            return
         language = self.language_codes.get(self.language_var.get())
         device_index = self._selected_microphone()
 
@@ -2674,6 +3142,7 @@ class TranscriberApp:
             status="running",
             model_key=model_key,
             kind="live",
+            engine=self.engine.backend_label if use_ollama else "",
             language=language,
             added_at=time.time(),
         )
@@ -2723,9 +3192,9 @@ class TranscriberApp:
         else:
             self._live_stopping = False
             self.add_btn.state(["!disabled"])
-            self.model_combo.state(["readonly"])
-            self.language_combo.state(["readonly"])
-            self.mic_combo.state(["readonly"])
+            self.model_combo.state(["!disabled", "readonly"])
+            self.language_combo.state(["!disabled", "readonly"])
+            self.mic_combo.state(["!disabled", "readonly"])
             self.timestamps_check.state(["!disabled"])
             self.live_btn.configure(
                 text="Live transcription", style="SmallSecondary.TButton"
@@ -2784,15 +3253,27 @@ class TranscriberApp:
         if self._live_stop is not None and self._live_stop.is_set():
             self.events.put(("live_done", 0.0, 0, 0.0, "Live microphone", language))
             return
-        try:
-            self._load_model_for_live(model_key)
-        except Exception as exc:
-            details = traceback.format_exc()
-            log.error("Could not load the model for live transcription\n%s", details)
+        use_ollama = self.engine.using_ollama
+        if use_ollama:
+            device_label = self.engine.backend_label
             self.events.put(
-                ("live_error", str(exc).strip() or type(exc).__name__, details)
+                ("status", f"Transcribing with {device_label}.", "accent")
             )
-            return
+            self.events.put(("device", device_label))
+        else:
+            try:
+                loaded = self._load_model_for_live(model_key)
+            except Exception as exc:
+                details = traceback.format_exc()
+                log.error(
+                    "Could not load the model for live transcription\n%s", details
+                )
+                self.events.put(
+                    ("live_error", str(exc).strip() or type(exc).__name__, details)
+                )
+                return
+            device_label = loaded.device_label
+            self.events.put(("device", device_label))
 
         if self._live_stop is not None and self._live_stop.is_set():
             self.events.put(("live_done", 0.0, 0, 0.0, "Live microphone", language))
@@ -3048,14 +3529,23 @@ class TranscriberApp:
                 if not self._popup_stopping:
                     self._stop_popup_capture()
             else:
-                self._start_popup_capture()
+                self._start_popup_capture(clear=True)
             return
         self._build_popup()
         if self._popup_active:
             self._set_popup_status("Finishing the previous dictation…", "warning")
             self._update_popup_controls()
         else:
-            self._start_popup_capture()
+            self._start_popup_capture(clear=True)
+
+    def _continue_popup_dictation(self) -> None:
+        if (
+            self._popup_window is None
+            or self._popup_active
+            or not self._popup_text_content().strip()
+        ):
+            return
+        self._start_popup_capture(clear=False)
 
     def _show_popup(self, window: tk.Toplevel) -> None:
         try:
@@ -3113,7 +3603,7 @@ class TranscriberApp:
         card.pack(fill="both", expand=True, padx=self.px(10), pady=self.px(10))
         inner = tk.Frame(card, bg=SURFACE)
         inner.pack(fill="both", expand=True, padx=self.px(16), pady=self.px(14))
-        inner.grid_rowconfigure(1, weight=1)
+        inner.grid_rowconfigure(2, weight=1)
         inner.grid_columnconfigure(0, weight=1)
 
         header = tk.Frame(inner, bg=SURFACE)
@@ -3156,9 +3646,92 @@ class TranscriberApp:
         )
         self._popup_status_label.pack(side="left", fill="x", expand=True)
 
+        settings_row = tk.Frame(inner, bg=SURFACE)
+        settings_row.grid(row=1, column=0, sticky="ew", pady=(self.px(10), 0))
+        settings_row.grid_columnconfigure(0, weight=1)
+        settings_row.grid_columnconfigure(1, weight=1)
+        label_opts = {
+            "bg": SURFACE,
+            "fg": MUTED,
+            "font": ("Segoe UI", 8, "bold"),
+            "anchor": "w",
+        }
+        tk.Label(settings_row, text="WHISPER MODEL", **label_opts).grid(
+            row=0, column=0, sticky="w", padx=(0, self.px(10))
+        )
+        tk.Label(settings_row, text="LANGUAGE", **label_opts).grid(
+            row=0, column=1, sticky="w", padx=(self.px(10), 0)
+        )
+        self._popup_model_combo = ttk.Combobox(
+            settings_row,
+            textvariable=self.model_var,
+            values=self.model_labels,
+            state="readonly",
+            style="Dark.TCombobox",
+            font=("Segoe UI", 9),
+            height=8,
+        )
+        self._popup_model_combo.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=(0, self.px(10)),
+            pady=(self.px(4), 0),
+        )
+        self._popup_language_combo = ttk.Combobox(
+            settings_row,
+            textvariable=self.language_var,
+            values=[label for label, _ in LANGUAGE_OPTIONS],
+            state="readonly",
+            style="Dark.TCombobox",
+            font=("Segoe UI", 9),
+            height=10,
+        )
+        self._popup_language_combo.grid(
+            row=1,
+            column=1,
+            sticky="ew",
+            padx=(self.px(10), 0),
+            pady=(self.px(4), 0),
+        )
+        self._popup_model_status_var = tk.StringVar(value="")
+        self._popup_model_status_label = tk.Label(
+            settings_row,
+            textvariable=self._popup_model_status_var,
+            bg=SURFACE,
+            fg=MUTED_DIM,
+            font=("Segoe UI", 8),
+            anchor="w",
+            justify="left",
+            wraplength=self.px(320),
+        )
+        self._popup_model_status_label.grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(self.px(6), 0)
+        )
+        self._popup_model_status_label.bind(
+            "<Button-1>", self._on_popup_model_status_click
+        )
+        self._popup_model_combo.bind(
+            "<<ComboboxSelected>>", self._on_model_selection_changed
+        )
+        self._popup_engine_status_var = tk.StringVar(value="")
+        self._popup_engine_status_label = tk.Label(
+            settings_row,
+            textvariable=self._popup_engine_status_var,
+            bg=SURFACE,
+            fg=MUTED_DIM,
+            font=("Segoe UI", 8),
+            anchor="w",
+            justify="left",
+            wraplength=self.px(400),
+        )
+        self._popup_engine_status_label.grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(self.px(3), 0)
+        )
+
         text_wrap = tk.Frame(inner, bg=SURFACE)
         text_wrap.grid(
-            row=1,
+            row=2,
             column=0,
             sticky="nsew",
             pady=(self.px(11), self.px(11)),
@@ -3216,7 +3789,7 @@ class TranscriberApp:
         self._popup_text.configure(yscrollcommand=scrollbar.set)
 
         buttons = tk.Frame(inner, bg=SURFACE)
-        buttons.grid(row=2, column=0, sticky="ew")
+        buttons.grid(row=3, column=0, sticky="ew")
         self._popup_primary = ttk.Button(
             buttons,
             text="Start dictation",
@@ -3225,6 +3798,15 @@ class TranscriberApp:
             cursor="hand2",
         )
         self._popup_primary.pack(side="left")
+        self._popup_continue_btn = ttk.Button(
+            buttons,
+            text="Continue",
+            style="SmallSecondary.TButton",
+            command=self._continue_popup_dictation,
+            cursor="hand2",
+            state=["disabled"],
+        )
+        self._popup_continue_btn.pack(side="left", padx=(self.px(8), 0))
         close_btn = ttk.Button(
             buttons,
             text="Close",
@@ -3244,9 +3826,9 @@ class TranscriberApp:
         self._popup_copy_btn.pack(side="right", padx=(0, self.px(8)))
 
         hint = (
-            f"{self._hotkey_label} starts and stops dictation"
+            f"{self._hotkey_label} restarts · Continue appends"
             if self._hotkey_label
-            else "Press Escape to close"
+            else "Continue appends after a new line · Esc closes"
         )
         tk.Label(
             inner,
@@ -3255,7 +3837,7 @@ class TranscriberApp:
             fg=MUTED_DIM,
             font=("Segoe UI", 8),
             anchor="w",
-        ).grid(row=3, column=0, sticky="ew", pady=(self.px(9), 0))
+        ).grid(row=4, column=0, sticky="ew", pady=(self.px(9), 0))
 
         window.bind("<Escape>", self._close_popup)
         window.bind("<Control-Return>", self._shortcut_popup_copy)
@@ -3264,12 +3846,14 @@ class TranscriberApp:
         self._popup_partial = ""
         self._popup_transcript = ""
         self._popup_accept_output = False
+        self._refresh_model_status()
+        self._refresh_engine_status()
         self._position_popup(window)
         self._show_popup(window)
 
     def _position_popup(self, window: tk.Toplevel) -> None:
         window.update_idletasks()
-        width, height = self.px(480), self.px(360)
+        width, height = self.px(480), self.px(420)
         left, top, screen_w, screen_h = self._virtual_screen()
         margin = self.px(16)
         try:
@@ -3284,7 +3868,7 @@ class TranscriberApp:
             y = pointer_y - height - self.px(24)
         y = max(top + margin, min(y, top + screen_h - height - margin))
         window.geometry(f"{width}x{height}+{x}+{y}")
-        window.minsize(self.px(360), self.px(260))
+        window.minsize(self.px(380), self.px(320))
 
     def _virtual_screen(self) -> tuple[int, int, int, int]:
         if os.name == "nt":
@@ -3304,6 +3888,7 @@ class TranscriberApp:
         )
 
     def _set_popup_controls(self, busy: bool) -> None:
+        popup_combos = (self._popup_model_combo, self._popup_language_combo)
         if busy:
             self.add_btn.state(["disabled"])
             self.model_combo.state(["disabled"])
@@ -3311,13 +3896,19 @@ class TranscriberApp:
             self.mic_combo.state(["disabled"])
             self.timestamps_check.state(["disabled"])
             self.live_btn.state(["disabled"])
+            for combo in popup_combos:
+                if combo is not None:
+                    combo.state(["disabled"])
         elif not (self._busy or self._live_active):
             self.add_btn.state(["!disabled"])
-            self.model_combo.state(["readonly"])
-            self.language_combo.state(["readonly"])
-            self.mic_combo.state(["readonly"])
+            self.model_combo.state(["!disabled", "readonly"])
+            self.language_combo.state(["!disabled", "readonly"])
+            self.mic_combo.state(["!disabled", "readonly"])
             self.timestamps_check.state(["!disabled"])
             self.live_btn.state(["!disabled"])
+            for combo in popup_combos:
+                if combo is not None:
+                    combo.state(["!disabled", "readonly"])
         self._update_action_button()
         self._update_transcript_buttons()
 
@@ -3379,7 +3970,17 @@ class TranscriberApp:
         if primary is None:
             return
         content = self._popup_text_content().strip()
-        if self._popup_stopping:
+        idle = (
+            not self._popup_active
+            and not self._popup_stopping
+            and not self._model_download_active
+        )
+        if self._model_download_active:
+            primary.configure(
+                text="Downloading model", style="SmallSecondary.TButton"
+            )
+            primary.state(["disabled"])
+        elif self._popup_stopping:
             primary.configure(text="Finishing…", style="SmallSecondary.TButton")
             primary.state(["disabled"])
         elif self._popup_active:
@@ -3387,16 +3988,20 @@ class TranscriberApp:
             primary.state(["!disabled"])
         else:
             primary.configure(
-                text="Start again" if content else "Start dictation",
+                text="Restart" if content else "Start dictation",
                 style="SmallAccent.TButton",
             )
             primary.state(["!disabled"])
+        if self._popup_continue_btn is not None:
+            self._popup_continue_btn.state(
+                ["!disabled"] if idle and content else ["disabled"]
+            )
         if self._popup_copy_btn is not None:
             self._popup_copy_btn.state(
                 ["!disabled"] if content else ["disabled"]
             )
 
-    def _start_popup_capture(self) -> None:
+    def _start_popup_capture(self, clear: bool = False) -> None:
         if self._popup_window is None or self._popup_active:
             return
         if self._busy or self._live_active:
@@ -3406,11 +4011,37 @@ class TranscriberApp:
             )
             self._update_popup_controls()
             return
+        if self._model_download_active:
+            self._set_popup_status(
+                "Downloading the selected model. Try again when it finishes.",
+                "warning",
+            )
+            self._update_popup_controls()
+            return
 
+        self.engine.refresh_ollama(force=False)
+        self._refresh_engine_status()
+        use_ollama = self.engine.using_ollama
         model_key = self.model_key_by_label.get(self.model_var.get(), DEFAULT_MODEL)
+        if not use_ollama and not self._ensure_model_available(
+            model_key, parent=self._popup_window
+        ):
+            if self._model_download_active:
+                self._set_popup_status(
+                    "Downloading the selected model.", "accent"
+                )
+            else:
+                self._set_popup_status(
+                    "The selected model is not downloaded. "
+                    "Use the download link above.",
+                    "warning",
+                )
+            self._update_popup_controls()
+            return
         language = self.language_codes.get(self.language_var.get())
         device_index = self._selected_microphone()
-        prefix = start_new_take(self._popup_text_content())
+        existing = "" if clear else self._popup_text_content()
+        prefix = start_new_take(existing)
 
         self._popup_session += 1
         self._popup_transcript = prefix
@@ -3423,11 +4054,17 @@ class TranscriberApp:
         self._popup_active = True
         self._popup_stop = threading.Event()
         self._set_popup_text_content(prefix, editable=False)
-        model_name = MODEL_NAMES.get(model_key, model_key)
-        self._set_popup_status(
-            f"Preparing the {model_name} model… first use may download it.",
-            "accent",
-        )
+        if use_ollama:
+            self._set_popup_status(
+                f"Preparing Ollama model {self.engine.ollama.selected}.",
+                "accent",
+            )
+        else:
+            model_name = MODEL_NAMES.get(model_key, model_key)
+            self._set_popup_status(
+                f"Preparing the {model_name} model.",
+                "accent",
+            )
         self._update_popup_controls()
         self._set_popup_controls(True)
         self._popup_thread = threading.Thread(
@@ -3461,13 +4098,16 @@ class TranscriberApp:
         if self._popup_stop is not None and self._popup_stop.is_set():
             emit("done", 0.0, 0, 0.0, "Microphone", language)
             return
-        try:
-            self._load_model_for_live(model_key)
-        except Exception as exc:
-            details = traceback.format_exc()
-            log.error("Could not load the model for quick dictation\n%s", details)
-            emit("error", str(exc).strip() or type(exc).__name__, details)
-            return
+        if not self.engine.using_ollama:
+            try:
+                self._load_model_for_live(model_key)
+            except Exception as exc:
+                details = traceback.format_exc()
+                log.error(
+                    "Could not load the model for quick dictation\n%s", details
+                )
+                emit("error", str(exc).strip() or type(exc).__name__, details)
+                return
 
         if self._popup_stop is not None and self._popup_stop.is_set():
             emit("done", 0.0, 0, 0.0, "Microphone", language)
@@ -3760,7 +4400,14 @@ class TranscriberApp:
         self._popup_window = None
         self._popup_text = None
         self._popup_primary = None
+        self._popup_continue_btn = None
         self._popup_copy_btn = None
+        self._popup_model_combo = None
+        self._popup_language_combo = None
+        self._popup_model_status_label = None
+        self._popup_model_status_var = None
+        self._popup_engine_status_label = None
+        self._popup_engine_status_var = None
         self._popup_status_label = None
         self._popup_status_var = None
         self._popup_dot = None
@@ -3790,7 +4437,14 @@ class TranscriberApp:
         self._popup_window = None
         self._popup_text = None
         self._popup_primary = None
+        self._popup_continue_btn = None
         self._popup_copy_btn = None
+        self._popup_model_combo = None
+        self._popup_language_combo = None
+        self._popup_model_status_label = None
+        self._popup_model_status_var = None
+        self._popup_engine_status_label = None
+        self._popup_engine_status_var = None
         self._popup_status_label = None
         self._popup_status_var = None
         self._popup_dot = None
@@ -3836,6 +4490,8 @@ class TranscriberApp:
             self._device_label = event[1]
             if event[1].startswith("GPU"):
                 self._set_badge("GPU ACTIVE", "success")
+            elif event[1].startswith("Ollama"):
+                self._set_badge("OLLAMA", "success")
             else:
                 self._set_badge("CPU ACTIVE", "success")
         elif kind == "file_start":
@@ -3890,6 +4546,10 @@ class TranscriberApp:
             )
         elif kind == "popup_error":
             self._on_popup_error(event[1], event[2], event[3])
+        elif kind == "model_download_done":
+            self._on_model_download_done(event[1], event[2])
+        elif kind == "model_download_error":
+            self._on_model_download_error(event[1], event[2], event[3])
 
     def _on_file_start(self, job_id: str, index: int, total: int) -> None:
         job = self._jobs_by_id.get(job_id)
@@ -4133,6 +4793,14 @@ class TranscriberApp:
             ):
                 return
             self._finalize_live_on_close()
+        if self._model_download_active:
+            if not messagebox.askyesno(
+                APP_NAME,
+                "A model download is still running.\n\n"
+                "Quit anyway? The download will be cancelled.",
+                parent=self.root,
+            ):
+                return
         self._shutdown_popup()
         if self._hotkey is not None:
             self._hotkey.stop()

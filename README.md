@@ -4,9 +4,10 @@
 [![Latest release](https://img.shields.io/github/v/release/autotelico/sensemaker?include_prereleases)](https://github.com/autotelico/sensemaker/releases)
 
 **SenseMaker** is a private, on-device audio transcription app for Windows.
-It uses OpenAI's Whisper models through `faster-whisper` to transcribe audio
-files and live microphone speech; audio is processed locally and is never
-uploaded. It is free software under [GPL-3.0-or-later](LICENSE).
+It uses OpenAI's Whisper models through `faster-whisper`, or an audio-capable
+local Ollama model when one is available, to transcribe audio files and live
+microphone speech; audio is processed locally and is never uploaded. It is free
+software under [GPL-3.0-or-later](LICENSE).
 
 > **Release status:** the source is GPL-3.0-or-later, but no compliant binary is
 > published yet. The current CTranslate2 wheel embeds proprietary Intel
@@ -48,10 +49,12 @@ Installed app data lives in `%LOCALAPPDATA%\SenseMaker`:
 - `settings.json` — non-sensitive preferences, including history retention
 - `sensemaker.log` — rotated diagnostic log with directory paths redacted
 
-The model weights are not bundled into the installer. The first use of a model
-downloads a pinned Hugging Face revision and verifies every runtime file against
-the SHA-256 manifest in `assets\model_manifests.json`. The default Small model
-is about 480 MB.
+The model weights are not bundled into the installer. The model row shows
+whether the selected model is present; if it is not, use **Download model** or
+start a transcription and confirm the download prompt. Downloads use a pinned
+Hugging Face revision and every runtime file is verified against the SHA-256
+manifest in `assets\model_manifests.json`. The default Small model is about
+480 MB.
 
 ## Privacy and history
 
@@ -90,6 +93,50 @@ Supported inputs include WAV, MP3, M4A, M4B, AAC, FLAC, OGG, OPUS, WMA, AIFF,
 AMR, AC3, MP2, and MPGA. Video files with audio tracks — MP4, M4V, MOV, MKV,
 WebM, AVI, WMV, FLV, and MPEG — are accepted as well.
 
+### Models
+
+The model row shows whether the selected model is already downloaded and
+offers **Download model** when it is not. Starting a transcription or live
+session with a missing model asks for confirmation before downloading. A
+download runs in the background and is verified against the pinned SHA-256
+manifest before the model is used. The quick dictation popup shows the same
+model status under its selectors; click the status to download.
+
+Models are stored in the `models` folder of the active data directory:
+
+- **Running from source:** the project's `models\` folder
+- **Installed app:** `%LOCALAPPDATA%\SenseMaker\models`
+- **With `SENSEMAKER_DATA_DIR` set:** `<that folder>\models`
+
+**Open models folder** beside the model status opens the folder in use and
+shows its path in the status bar.
+
+### Local Ollama audio models
+
+SenseMaker checks a local Ollama server at startup, before each transcription,
+and when **Refresh** is clicked next to **SPEECH ENGINE**. If Ollama has a model
+with audio capability, SenseMaker uses its
+`/v1/audio/transcriptions` endpoint and does not need a Whisper model.
+Otherwise it uses the selected Whisper model, downloading it with confirmation
+if necessary.
+
+- Only loopback Ollama servers are used. If `OLLAMA_HOST` points to another
+  machine, SenseMaker refuses to send audio there and falls back to Whisper.
+- Text-only or vision-only Ollama models cannot transcribe audio and are
+  ignored; SenseMaker requires a model whose Ollama capabilities include audio.
+- Ollama audio support is new and requires a recent Ollama build plus an
+  audio-capable model, such as Gemma 4 audio. If your Ollama library provides
+  it, pull one for example with `ollama pull gemma4:e4b`, then click
+  **Refresh**.
+- Ollama audio is batch-oriented, so the grey live preview is skipped; text
+  appears when a phrase is committed. Long file audio is split into short
+  speech chunks before transcription.
+- The **SPEECH ENGINE** row shows `Ollama · <model>` or `Whisper · <reason>`.
+  The Whisper model row remains the fallback and can be downloaded in advance.
+- Ollama is optional, separate software and is not bundled with SenseMaker.
+  Ollama manages its own model storage (typically `%USERPROFILE%\.ollama`);
+  SenseMaker only asks the running server which audio models it has.
+
 ### Live transcription
 
 1. Pick a model and language, then choose a microphone under **Live
@@ -118,13 +165,18 @@ Press `Ctrl+Alt+Space` anywhere on your desktop, or click **Quick dictation
 popup** under the microphone picker. SenseMaker opens a small always-on-top
 window and starts listening with the selected model, language, and microphone.
 
+- The **Model** and **Language** selectors in the popup stay in sync with the
+  main window, so you can change them without leaving the popup.
+- If the selected model is not downloaded, a status line under the selectors
+  says so; click it to download the model.
 - The phrase currently being recognised appears in grey; completed phrases are
   added to the editable text box as you speak.
 - Press `Ctrl+Alt+Space` again or click **Stop** to finish. The text stays
   editable, and **Copy** (or `Ctrl+Enter`) puts it on the clipboard.
+- **Restart** clears the text box and starts a fresh take. The shortcut also
+  restarts by default once a take has finished.
+- **Continue** keeps the existing text and appends the next take on a new line.
 - Pressing `Escape` closes the popup and stops listening.
-- Press the shortcut again after finishing to dictate another take; it is
-  appended on a new line.
 - If another program already uses `Ctrl+Alt+Space`, SenseMaker tries
   `Ctrl+Shift+Space` and then `Ctrl+Alt+D`. The link shows the active shortcut.
 - Popup dictations are not added to the audio library or transcript history.
@@ -143,7 +195,7 @@ implemented yet.
 | `Ctrl+Enter` | Transcribe queued files |
 | `Ctrl+Shift+C` | Copy the selected transcript |
 | `Ctrl+L` | Start or stop live transcription |
-| `Ctrl+Alt+Space` | Open or stop the quick dictation popup (system-wide) |
+| `Ctrl+Alt+Space` | Open, stop, or restart the quick dictation popup (system-wide) |
 
 ## Running from source
 
@@ -225,6 +277,8 @@ Without one, SenseMaker uses the CPU.
 - To force CPU mode, set the environment variable `WHISPER_DEVICE=cpu`.
 - To skip registering the system-wide quick dictation shortcut, set
   `SENSEMAKER_NO_HOTKEY=1`; the popup link still works.
+- `OLLAMA_HOST` may select a different Ollama address, but only loopback
+  addresses (`localhost`, `127.0.0.1`, `::1`) are accepted for audio.
 - For development, `SENSEMAKER_DATA_DIR` can point data at another folder.
 
 ## License

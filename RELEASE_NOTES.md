@@ -8,9 +8,15 @@ Private, on-device audio transcription for Windows 10/11 (x64).
 ## Highlights
 
 - Transcribe audio and video files locally.
+- Uses an audio-capable local Ollama model when available; falls back to
+  SenseMaker's pinned Whisper models otherwise.
+- Model availability is shown in-app, with an explicit download control, an
+  **Open models folder** link, and a confirmation prompt before downloading a
+  missing model.
 - Live microphone transcription with committed text and an in-progress preview.
-- Quick dictation popup from a system-wide shortcut (`Ctrl+Alt+Space`), with an
-  editable text box and one-click copy.
+- Quick dictation popup from a system-wide shortcut (`Ctrl+Alt+Space`), with
+  model/language selection, restart/continue, an editable text box, and
+  one-click copy.
 - Optional DPAPI-encrypted transcript history for files and library live
   sessions; popup dictations are never saved.
 
@@ -30,6 +36,8 @@ that the publisher is unrecognized. You can verify the download against
 
 - Audio is decoded and transcribed on your computer. Nothing is uploaded.
 - Live microphone audio is transcribed in memory and is never written to disk.
+- If an audio-capable local Ollama model is used, audio goes only to the
+  loopback Ollama server on this PC; remote `OLLAMA_HOST` values are refused.
 - Quick dictation popup transcripts are never written to the library or
   history; only Copy places them on the Windows clipboard.
 - SenseMaker contacts the network only to download a pinned Whisper model from

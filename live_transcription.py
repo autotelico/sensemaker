@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import time
 from dataclasses import dataclass
 from typing import Callable, Sequence
@@ -49,6 +50,36 @@ _CJK_RANGES = (
     (0x20000, 0x2FA1F),  # CJK Extension B and later
 )
 _NO_SPACE_BEFORE = set(",.;:!?%)]}，。！？、；：）】》」』…—–")
+_NON_SPEECH_TAGS = re.compile(
+    r"\[(?:blank_audio|music|applause|silence|noise|inaudible)\]"
+    r"|\((?:music|applause|silence|inaudible)\)"
+    r"|♪+",
+    re.IGNORECASE,
+)
+_EDGE_ELLIPSES = re.compile(
+    r"^(?:\s*(?:\.{3,}|…))+\s*|(?:\s*(?:\.{3,}|…))+\s*$"
+)
+
+
+def clean_transcript_text(text: str) -> str:
+    """Drop pause artifacts such as ``...`` and non-speech tags.
+
+    Whisper can return punctuation-only chunks for breath or room noise around
+    a pause. Those look like constant ellipses in the transcript. Standalone
+    pause punctuation is removed entirely, and leading/trailing ellipses are
+    trimmed from real words while ellipses inside a sentence are kept.
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    text = _NON_SPEECH_TAGS.sub("", text)
+    if not any(character.isalnum() for character in text):
+        return ""
+    text = _EDGE_ELLIPSES.sub("", text).strip()
+    text = " ".join(text.split())
+    if not any(character.isalnum() for character in text):
+        return ""
+    return text
 
 
 def _is_cjk(character: str) -> bool:
@@ -276,6 +307,7 @@ class LiveTranscriber:
         now = time.monotonic()
         if (
             allow_partial
+            and getattr(self.engine, "supports_partial_preview", True)
             and now - self._last_partial_at >= PARTIAL_INTERVAL_S
             and pending.size >= int(MIN_PARTIAL_AUDIO_S * SAMPLE_RATE)
         ):
@@ -324,9 +356,10 @@ class LiveTranscriber:
             piece = segment.text.strip()
             if piece:
                 text = join_transcript(text, piece)
-        text = text.strip()
+        text = clean_transcript_text(text)
         if (
-            self.language is None
+            text
+            and self.language is None
             and not self._language_reported
             and audio.size >= int(MIN_LANGUAGE_S * SAMPLE_RATE)
         ):

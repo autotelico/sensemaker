@@ -8,6 +8,7 @@ import numpy as np
 from live_transcription import (
     SAMPLE_RATE,
     LiveTranscriber,
+    clean_transcript_text,
     commit_point,
     join_transcript,
     prompt_tail,
@@ -66,6 +67,52 @@ class NewTakeTests(unittest.TestCase):
 
     def test_trailing_whitespace_is_normalised(self):
         self.assertEqual(start_new_take("Hello\n\n"), "Hello\n")
+
+
+class CleanTranscriptTests(unittest.TestCase):
+    def test_punctuation_only_is_removed(self):
+        for text in ("...", "…", ". . .", " - ", "!!!", "♪♪"):
+            with self.subTest(text=text):
+                self.assertEqual(clean_transcript_text(text), "")
+
+    def test_non_speech_tags_are_removed(self):
+        for text in ("[BLANK_AUDIO]", "[MUSIC]", "(music)", " [applause] "):
+            with self.subTest(text=text):
+                self.assertEqual(clean_transcript_text(text), "")
+
+    def test_edge_ellipses_are_trimmed(self):
+        for text, expected in (
+            ("Hello...", "Hello"),
+            ("Hello…", "Hello"),
+            ("... Hello", "Hello"),
+            ("… Hello", "Hello"),
+            ("Hello. ...", "Hello."),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(clean_transcript_text(text), expected)
+
+    def test_internal_ellipses_are_kept(self):
+        self.assertEqual(
+            clean_transcript_text("Hello... world"), "Hello... world"
+        )
+
+    def test_normal_punctuation_is_kept(self):
+        self.assertEqual(clean_transcript_text("Hello."), "Hello.")
+
+    def test_cjk_text_is_kept(self):
+        self.assertEqual(clean_transcript_text("你好..."), "你好")
+
+    def test_parenthesised_words_are_kept(self):
+        self.assertEqual(clean_transcript_text("(Hello)"), "(Hello)")
+
+    def test_tags_mixed_with_words_are_removed(self):
+        self.assertEqual(clean_transcript_text("Hello [music]"), "Hello")
+
+    def test_whitespace_is_collapsed(self):
+        self.assertEqual(clean_transcript_text("Hello   world"), "Hello world")
+
+    def test_empty_input(self):
+        self.assertEqual(clean_transcript_text("   "), "")
 
 
 class CommitPointTests(unittest.TestCase):
@@ -192,6 +239,27 @@ class ProcessTests(unittest.TestCase):
         transcriber, events = self._transcriber(vad)
         transcriber._flush(np.zeros(int(SAMPLE_RATE * 1), dtype=np.float32))
         self.assertIn(("segment", "hello"), events)
+
+    def test_transcribe_drops_pause_punctuation(self):
+        transcriber, events = self._transcriber(
+            lambda audio, options, rate: [],
+            FakeEngine(text="..."),
+        )
+        result = transcriber._transcribe(
+            np.zeros(int(SAMPLE_RATE * 1.2), dtype=np.float32), beam_size=1
+        )
+        self.assertEqual(result, "")
+        self.assertEqual(events, [])
+
+    def test_transcribe_strips_edge_ellipses(self):
+        transcriber, _events = self._transcriber(
+            lambda audio, options, rate: [],
+            FakeEngine(text="Hello..."),
+        )
+        result = transcriber._transcribe(
+            np.zeros(int(SAMPLE_RATE * 1.2), dtype=np.float32), beam_size=1
+        )
+        self.assertEqual(result, "Hello")
 
 
 if __name__ == "__main__":

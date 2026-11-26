@@ -1,6 +1,6 @@
 # SenseMaker Privacy Notice
 
-**Version 1.2 · Effective 2026-11-26**
+**Version 1.3 · Effective 2026-11-26**
 
 SenseMaker is a local desktop application for transcribing audio. This notice
 describes what it does with data on your computer.
@@ -33,12 +33,28 @@ converted to 16 kHz mono, and sent only to the local Whisper model.
 - Live transcription is visible in the audio library as a normal transcript
   entry. It has no source file to reopen or retry.
 
+## Local Ollama models
+
+If an audio-capable Ollama model is available, SenseMaker may send microphone
+or file audio to the Ollama server running on this computer for transcription.
+
+- Only loopback Ollama addresses are used (`localhost`, `127.0.0.1`, `::1`).
+  If `OLLAMA_HOST` points to another machine, SenseMaker refuses to use it and
+  falls back to Whisper. Audio is not sent to a remote Ollama server.
+- The Ollama server and model are separate software. Their own logging,
+  storage, and network behavior are outside SenseMaker's control; review the
+  Ollama documentation for your installation.
+- If no audio-capable local Ollama model is available, SenseMaker uses its
+  Whisper models as described above.
+
 ## Network access
 
-SenseMaker uses the network only to download Whisper models from Hugging Face
-when a model is not already cached locally:
+SenseMaker uses the network to download Whisper models from Hugging Face when
+a model is not already cached locally. A loopback Ollama request stays on this
+computer and is not an upload. Model downloads:
 
-- The request includes ordinary network metadata such as your IP address,
+- Downloads normally start from **Download model** in the model row, or after
+  you confirm the prompt shown when a transcription uses a missing model.- The request includes ordinary network metadata such as your IP address,
   user agent, and the model repository/name.
 - The request does **not** include your audio, transcript, or file names.
 - Models are pinned to reviewed, immutable revisions and their files are

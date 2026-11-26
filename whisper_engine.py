@@ -15,12 +15,16 @@ import os
 import shutil
 import site
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import av
 import numpy as np
+
+import ollama_audio
 
 APP_DIR = Path(__file__).resolve().parent
 RESOURCE_DIR = (
@@ -189,6 +193,7 @@ _CUDA_DLL_HANDLES = _configure_cuda_dlls()
 os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
 
 from faster_whisper import WhisperModel  # noqa: E402
+from faster_whisper.vad import VadOptions, get_speech_timestamps  # noqa: E402
 
 try:
     import onnxruntime as _onnxruntime
@@ -196,6 +201,13 @@ try:
     _onnxruntime.disable_telemetry_events()
 except Exception:
     pass
+
+_OLLAMA_VAD = VadOptions(
+    threshold=0.5,
+    min_speech_duration_ms=200,
+    min_silence_duration_ms=500,
+    speech_pad_ms=200,
+)
 
 
 class AudioFileError(RuntimeError):
@@ -386,6 +398,45 @@ class TranscriptionEngine:
         self._manifest: dict[str, Any] | None = None
         self._gpu_blocked = False
         self._device_override = os.environ.get("WHISPER_DEVICE", "auto").strip().lower()
+        self._ollama = ollama_audio.OllamaDiscovery(
+            "", False, (), None, "Not checked yet"
+        )
+        self._ollama_checked_at = 0.0
+
+    @property
+    def ollama(self) -> ollama_audio.OllamaDiscovery:
+        return self._ollama
+
+    @property
+    def using_ollama(self) -> bool:
+        return self._ollama.selected is not None
+
+    @property
+    def supports_partial_preview(self) -> bool:
+        return not self.using_ollama
+
+    @property
+    def backend_label(self) -> str:
+        if self.using_ollama:
+            return f"Ollama · {self._ollama.selected}"
+        return "Whisper"
+
+    def refresh_ollama(
+        self, force: bool = False, timeout: float = 0.8
+    ) -> ollama_audio.OllamaDiscovery:
+        """Check the loopback Ollama server for an audio-capable model."""
+        now = time.monotonic()
+        if not force and now - self._ollama_checked_at < 10.0:
+            return self._ollama
+        self._ollama = ollama_audio.discover(timeout=timeout)
+        self._ollama_checked_at = time.monotonic()
+        if self._ollama.selected:
+            self.log.info("Using Ollama audio model %s", self._ollama.selected)
+        elif self._ollama.available:
+            self.log.info("Ollama audio unavailable: %s", self._ollama.error)
+        else:
+            self.log.info("Ollama not used: %s", self._ollama.error)
+        return self._ollama
 
     def _manifest_entry(self, model_key: str) -> dict[str, Any]:
         if self._manifest is None:
@@ -477,6 +528,53 @@ class TranscriptionEngine:
         self.log.info("Verified pinned model files for %s", model_key)
         return target
 
+    @staticmethod
+    def _files_present(folder: Path, files: dict[str, Any]) -> bool:
+        """Fast presence and size check; model contents are not hashed."""
+        if not folder.is_dir():
+            return False
+        for name, metadata in files.items():
+            if not isinstance(metadata, dict):
+                return False
+            path = folder / name
+            try:
+                if not path.is_file():
+                    return False
+                expected_size = metadata.get("size")
+                if (
+                    expected_size is not None
+                    and path.stat().st_size != int(expected_size)
+                ):
+                    return False
+            except OSError:
+                return False
+        return True
+
+    def model_ready(self, model_key: str) -> bool:
+        """Return True if a pinned model folder looks complete on disk.
+
+        This only checks file presence and sizes so the UI can show whether a
+        model needs downloading without hashing gigabytes on every selection.
+        Loading a model still verifies every SHA-256 in ``ensure_model``.
+        """
+        try:
+            entry = self._manifest_entry(model_key)
+        except ModelIntegrityError:
+            return False
+        repo = str(entry.get("repo") or "")
+        revision = str(entry.get("revision") or "")
+        files = entry.get("files")
+        if not repo or not revision or not isinstance(files, dict) or not files:
+            return False
+        candidates = (
+            self.models_dir
+            / f"models--{repo.replace('/', '--')}"
+            / "snapshots"
+            / revision,
+            self.models_dir / f"{model_key}-{revision[:12]}",
+        )
+        return any(self._files_present(folder, files) for folder in candidates)
+
     def _cuda_compute_types(self) -> set[str]:
         try:
             import ctranslate2
@@ -558,6 +656,8 @@ class TranscriptionEngine:
         return self._loaded
 
     def transcribe(self, path: Path, language: str | None):
+        if self.using_ollama:
+            return self._transcribe_ollama_file(path, language)
         if self._loaded is None:
             raise RuntimeError("No Whisper model is loaded.")
 
@@ -573,6 +673,98 @@ class TranscriptionEngine:
         )
         return segments, info
 
+    def _transcribe_ollama_file(self, path: Path, language: str | None):
+        audio = _decode_audio(path)
+        duration = float(audio.size) / 16000.0 if audio.size else None
+        info = SimpleNamespace(
+            language=language,
+            language_probability=1.0 if language else 0.0,
+            duration=duration,
+        )
+        return self._ollama_segments(audio, language), info
+
+    def _ollama_chunks(self, audio: np.ndarray, max_seconds: float = 25.0):
+        """Yield (start_sample, end_sample, audio) speech groups under the cap.
+
+        Ollama audio models take short clips. Grouping detected speech on VAD
+        pauses avoids cutting words at arbitrary fixed boundaries.
+        """
+        sample_rate = 16000
+        max_samples = max(1, int(max_seconds * sample_rate))
+        minimum = int(0.2 * sample_rate)
+        try:
+            spans = get_speech_timestamps(audio, _OLLAMA_VAD, sample_rate)
+        except Exception:
+            self.log.exception(
+                "Speech detection failed for Ollama; using fixed windows"
+            )
+            spans = None
+
+        if spans is None:
+            for start in range(0, len(audio), max_samples):
+                end = min(len(audio), start + max_samples)
+                if end - start >= minimum:
+                    yield start, end, audio[start:end]
+            return
+        if not spans:
+            return
+
+        group_start: int | None = None
+        group_end: int | None = None
+        pieces: list[np.ndarray] = []
+        group_samples = 0
+        for span in spans:
+            start = max(0, int(span["start"]))
+            end = min(len(audio), int(span["end"]))
+            if end - start < minimum:
+                continue
+            if end - start > max_samples:
+                if pieces and group_start is not None:
+                    yield group_start, group_end, np.concatenate(pieces)
+                    pieces = []
+                    group_samples = 0
+                    group_start = group_end = None
+                offset = start
+                while offset < end:
+                    chunk_end = min(end, offset + max_samples)
+                    if chunk_end - offset >= minimum:
+                        yield offset, chunk_end, audio[offset:chunk_end]
+                    offset = chunk_end
+                continue
+            if pieces and group_samples + (end - start) > max_samples:
+                yield group_start, group_end, np.concatenate(pieces)
+                pieces = []
+                group_samples = 0
+                group_start = group_end = None
+            if group_start is None:
+                group_start = start
+            pieces.append(audio[start:end])
+            group_end = end
+            group_samples += end - start
+
+        if pieces and group_start is not None:
+            yield group_start, group_end, np.concatenate(pieces)
+
+    def _ollama_segments(self, audio: np.ndarray, language: str | None):
+        selected = self._ollama.selected
+        base_url = self._ollama.base_url
+        if not selected:
+            return
+        for start, end, chunk in self._ollama_chunks(audio):
+            text = ollama_audio.transcribe(
+                chunk,
+                model=selected,
+                base_url=base_url,
+                language=language,
+                sample_rate=16000,
+            )
+            if text:
+                yield SimpleNamespace(
+                    text=text,
+                    start=start / 16000.0,
+                    end=end / 16000.0,
+                )
+
     def transcribe_array(
         self,
         audio: np.ndarray,
@@ -585,6 +777,25 @@ class TranscriptionEngine:
         Live transcription calls this with short, silence-trimmed phrases, so
         no VAD or timestamp decoding is needed and latency stays low.
         """
+        if self.using_ollama:
+            selected = self._ollama.selected
+            duration = float(np.size(audio)) / 16000.0
+            text = ollama_audio.transcribe(
+                audio,
+                model=selected,
+                base_url=self._ollama.base_url,
+                language=language,
+                prompt=initial_prompt,
+                sample_rate=16000,
+            )
+            segment = SimpleNamespace(text=text, start=0.0, end=duration)
+            info = SimpleNamespace(
+                language=language,
+                language_probability=1.0 if language else 0.0,
+                duration=duration,
+            )
+            return [segment], info
+
         if self._loaded is None:
             raise RuntimeError("No Whisper model is loaded.")
 
