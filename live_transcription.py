@@ -87,6 +87,12 @@ def prompt_tail(text: str, limit: int = PROMPT_CHARS) -> str:
     return tail
 
 
+def start_new_take(existing: str) -> str:
+    """Prefix a fresh dictation take after any text already in the box."""
+    text = (existing or "").rstrip()
+    return f"{text}\n" if text else ""
+
+
 def commit_point(
     audio_length: int,
     segments: Sequence[dict],

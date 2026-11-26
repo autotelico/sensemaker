@@ -23,6 +23,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from audio_capture import list_input_devices
+from global_hotkey import GlobalHotkey
 from secure_store import (
     SETTINGS_FILENAME,
     HistoryStore,
@@ -48,7 +49,7 @@ from whisper_engine import (
     language_name,
     looks_like_gpu_error,
 )
-from live_transcription import LiveTranscriber, join_transcript
+from live_transcription import LiveTranscriber, join_transcript, start_new_take
 
 APP_NAME = "SenseMaker"
 SETTINGS_PATH = DATA_DIR / SETTINGS_FILENAME
@@ -348,6 +349,30 @@ class TranscriberApp:
         self._live_partial = ""
         self._live_device_label = ""
         self._mic_index_by_label: dict[str, int | None] = {}
+        self._popup_window: tk.Toplevel | None = None
+        self._popup_text: tk.Text | None = None
+        self._popup_primary: ttk.Button | None = None
+        self._popup_copy_btn: ttk.Button | None = None
+        self._popup_status_label: tk.Label | None = None
+        self._popup_status_var: tk.StringVar | None = None
+        self._popup_dot: tk.Canvas | None = None
+        self._popup_dot_id: int | None = None
+        self._popup_stop: threading.Event | None = None
+        self._popup_thread: threading.Thread | None = None
+        self._popup_timer: str | None = None
+        self._popup_copy_reset: str | None = None
+        self._popup_active = False
+        self._popup_stopping = False
+        self._popup_accept_output = False
+        self._popup_session = 0
+        self._popup_started = 0.0
+        self._popup_partial = ""
+        self._popup_transcript = ""
+        self._popup_language: str | None = None
+        self._popup_device_label = ""
+        self._hotkey: GlobalHotkey | None = None
+        self._hotkey_label: str | None = None
+        self._quick_link: tk.Label | None = None
         self._history = HistoryStore(DATA_DIR)
         self._retain_history = True
         self._history_error: str | None = None
@@ -387,6 +412,7 @@ class TranscriberApp:
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._poll_job = self.root.after(80, self._poll_events)
+        self._start_global_hotkey()
 
     # --- Layout helpers ------------------------------------------------------
     def px(self, value: float) -> int:
@@ -833,6 +859,19 @@ class TranscriberApp:
             height=8,
         )
         self.mic_combo.pack(fill="x", pady=(self.px(5), 0))
+        self._quick_link = tk.Label(
+            mic_row,
+            text="Quick dictation popup",
+            bg=SURFACE,
+            fg=ACCENT,
+            font=("Segoe UI", 8, "underline"),
+            anchor="w",
+            cursor="hand2",
+        )
+        self._quick_link.pack(fill="x", pady=(self.px(6), 0))
+        self._quick_link.bind(
+            "<Button-1>", lambda _event: self._toggle_popup_dictation()
+        )
 
         list_wrap = tk.Frame(card, bg=SURFACE)
         list_wrap.pack(
@@ -1071,8 +1110,8 @@ class TranscriberApp:
                 "audio is transcribed in memory and never written to disk.\n\n"
                 "When history is on, completed transcripts (including live sessions) "
                 "and source references are encrypted with Windows DPAPI and readable by "
-                "this Windows account. Logs are limited in size and directory paths are "
-                "redacted."
+                "this Windows account. Quick dictation popups are never saved to "
+                "history. Logs are limited in size and directory paths are redacted."
             ),
             bg=SURFACE,
             fg=MUTED,
@@ -1208,7 +1247,7 @@ class TranscriberApp:
             self._set_status("History turned on. Encrypted history will be saved.", "muted")
 
     def _clear_all_history(self) -> None:
-        if self._busy or self._live_active:
+        if self._busy or self._live_active or self._popup_active:
             messagebox.showinfo(
                 "Privacy & history",
                 "Wait for the current transcription to finish before clearing history.",
@@ -1901,7 +1940,7 @@ class TranscriberApp:
 
     # --- File selection ------------------------------------------------------
     def choose_files(self) -> None:
-        if self._busy or self._live_active:
+        if self._busy or self._live_active or self._popup_active:
             return
         selected = filedialog.askopenfilenames(
             parent=self.root,
@@ -2135,7 +2174,7 @@ class TranscriberApp:
 
         if job is None:
             self.remove_btn.state(["disabled"])
-        elif self._busy or self._live_active:
+        elif self._busy or self._live_active or self._popup_active:
             self.remove_btn.state(["disabled"])
         else:
             self.remove_btn.state(["!disabled"])
@@ -2144,6 +2183,7 @@ class TranscriberApp:
             job is not None
             and not self._busy
             and not self._live_active
+            and not self._popup_active
             and job.status in ("error", "cancelled")
             and job.exists
         )
@@ -2233,7 +2273,7 @@ class TranscriberApp:
             pass
 
     def remove_selected(self) -> None:
-        if self._busy or self._live_active:
+        if self._busy or self._live_active or self._popup_active:
             return
         job = self._selected_job()
         if job is None:
@@ -2263,7 +2303,7 @@ class TranscriberApp:
         self._set_status("Removed from the library.", "muted")
 
     def retry_selected(self) -> None:
-        if self._busy or self._live_active:
+        if self._busy or self._live_active or self._popup_active:
             return
         job = self._selected_job()
         if job is None or job.status not in ("error", "cancelled"):
@@ -2337,6 +2377,10 @@ class TranscriberApp:
             self.transcribe_btn.configure(text="Live session running")
             self.transcribe_btn.state(["disabled"])
             return
+        if self._popup_active:
+            self.transcribe_btn.configure(text="Quick dictation running")
+            self.transcribe_btn.state(["disabled"])
+            return
         if self._busy:
             self.transcribe_btn.configure(text="Transcribing…")
             self.transcribe_btn.state(["disabled"])
@@ -2352,7 +2396,7 @@ class TranscriberApp:
 
     # --- Transcription -------------------------------------------------------
     def start_transcription(self) -> None:
-        if self._busy or self._live_active:
+        if self._busy or self._live_active or self._popup_active:
             return
         queued = [job.id for job in self._ordered_jobs() if job.status == "queued"]
         if not queued:
@@ -2362,7 +2406,7 @@ class TranscriberApp:
         self._start_batch(queued)
 
     def _start_batch(self, job_ids: list[str]) -> None:
-        if self._busy or self._live_active:
+        if self._busy or self._live_active or self._popup_active:
             return
         ids = [job_id for job_id in job_ids if job_id in self._jobs_by_id]
         if not ids:
@@ -2616,7 +2660,7 @@ class TranscriberApp:
             self.start_live()
 
     def start_live(self) -> None:
-        if self._busy or self._live_active:
+        if self._busy or self._live_active or self._popup_active:
             return
         model_key = self.model_key_by_label.get(self.model_var.get(), DEFAULT_MODEL)
         language = self.language_codes.get(self.language_var.get())
@@ -2967,6 +3011,796 @@ class TranscriberApp:
         if thread is not None:
             thread.join(timeout=1.5)
 
+    # --- Quick dictation popup -----------------------------------------------
+    def _start_global_hotkey(self) -> None:
+        if os.environ.get("SENSEMAKER_NO_HOTKEY", "").strip():
+            self._update_quick_link()
+            return
+        try:
+            self._hotkey = GlobalHotkey(lambda: self.events.put(("hotkey",)))
+            self._hotkey_label = self._hotkey.start()
+        except Exception:
+            log.exception("Could not start the global dictation shortcut")
+            self._hotkey = None
+            self._hotkey_label = None
+        self._update_quick_link()
+        if self._hotkey_label is None:
+            self._set_status(
+                "Global dictation shortcut unavailable; use the quick dictation link.",
+                "warning",
+            )
+
+    def _update_quick_link(self) -> None:
+        if self._quick_link is None:
+            return
+        if self._hotkey_label:
+            self._quick_link.configure(
+                text=f"Quick dictation popup · {self._hotkey_label}"
+            )
+        else:
+            self._quick_link.configure(text="Quick dictation popup")
+
+    def _toggle_popup_dictation(self) -> None:
+        window = self._popup_window
+        if window is not None and window.winfo_exists():
+            self._show_popup(window)
+            if self._popup_active:
+                if not self._popup_stopping:
+                    self._stop_popup_capture()
+            else:
+                self._start_popup_capture()
+            return
+        self._build_popup()
+        if self._popup_active:
+            self._set_popup_status("Finishing the previous dictation…", "warning")
+            self._update_popup_controls()
+        else:
+            self._start_popup_capture()
+
+    def _show_popup(self, window: tk.Toplevel) -> None:
+        try:
+            window.deiconify()
+            window.lift()
+            window.attributes("-topmost", True)
+            window.focus_force()
+        except tk.TclError:
+            return
+        window.after(20, lambda: self._force_popup_foreground(window))
+
+    def _force_popup_foreground(self, window: tk.Toplevel) -> None:
+        if os.name != "nt":
+            return
+        try:
+            window.update_idletasks()
+            hwnd = (
+                ctypes.windll.user32.GetParent(window.winfo_id())
+                or window.winfo_id()
+            )
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            ctypes.windll.user32.SetFocus(hwnd)
+        except Exception:
+            log.debug(
+                "Could not bring the quick dictation popup to the foreground",
+                exc_info=True,
+            )
+
+    def _build_popup(self) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("Quick dictation")
+        window.configure(bg=BG)
+        window.attributes("-topmost", True)
+        try:
+            window.attributes("-toolwindow", True)
+        except tk.TclError:
+            pass
+        window.resizable(True, True)
+        window.protocol("WM_DELETE_WINDOW", self._close_popup)
+        try:
+            icon = getattr(self.root, "_app_icon", None)
+            if icon is not None:
+                window.iconphoto(False, icon)
+        except tk.TclError:
+            pass
+
+        card = tk.Frame(
+            window,
+            bg=SURFACE,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=BORDER,
+        )
+        card.pack(fill="both", expand=True, padx=self.px(10), pady=self.px(10))
+        inner = tk.Frame(card, bg=SURFACE)
+        inner.pack(fill="both", expand=True, padx=self.px(16), pady=self.px(14))
+        inner.grid_rowconfigure(1, weight=1)
+        inner.grid_columnconfigure(0, weight=1)
+
+        header = tk.Frame(inner, bg=SURFACE)
+        header.grid(row=0, column=0, sticky="ew")
+        tk.Label(
+            header,
+            text="QUICK DICTATION",
+            bg=SURFACE,
+            fg=MUTED,
+            font=("Segoe UI", 8, "bold"),
+            anchor="w",
+        ).pack(anchor="w")
+
+        status_row = tk.Frame(header, bg=SURFACE)
+        status_row.pack(fill="x", pady=(self.px(4), 0))
+        status_row.bind("<Configure>", self._on_popup_status_resize)
+        dot_size = self.px(8)
+        self._popup_dot = tk.Canvas(
+            status_row,
+            width=dot_size,
+            height=dot_size,
+            bg=SURFACE,
+            highlightthickness=0,
+            bd=0,
+        )
+        self._popup_dot.pack(side="left", padx=(0, self.px(6)))
+        self._popup_dot_id = self._popup_dot.create_oval(
+            0, 0, dot_size, dot_size, fill=ACCENT, outline=""
+        )
+        self._popup_status_var = tk.StringVar(value="Preparing…")
+        self._popup_status_label = tk.Label(
+            status_row,
+            textvariable=self._popup_status_var,
+            bg=SURFACE,
+            fg=ACCENT,
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify="left",
+            wraplength=self.px(380),
+        )
+        self._popup_status_label.pack(side="left", fill="x", expand=True)
+
+        text_wrap = tk.Frame(inner, bg=SURFACE)
+        text_wrap.grid(
+            row=1,
+            column=0,
+            sticky="nsew",
+            pady=(self.px(11), self.px(11)),
+        )
+        text_wrap.grid_rowconfigure(0, weight=1)
+        text_wrap.grid_columnconfigure(0, weight=1)
+
+        self._popup_text = tk.Text(
+            text_wrap,
+            wrap="word",
+            undo=True,
+            maxundo=100,
+            bg=TEXT_BG,
+            fg=TEXT,
+            insertbackground=TEXT,
+            insertwidth=max(1, self.px(1.5)),
+            selectbackground=SELECT_BG,
+            selectforeground=TEXT,
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+            padx=self.px(12),
+            pady=self.px(10),
+            font=("Segoe UI", 11),
+            spacing1=self.px(1),
+            spacing2=self.px(1),
+            spacing3=self.px(3),
+            height=7,
+            state="disabled",
+        )
+        self._popup_text.grid(row=0, column=0, sticky="nsew")
+        self._popup_text.tag_configure(
+            "body",
+            spacing1=self.px(1),
+            spacing3=self.px(5),
+            lmargin1=0,
+            lmargin2=0,
+        )
+        self._popup_text.tag_configure(
+            "popup_partial",
+            foreground=MUTED,
+            font=("Segoe UI", 11, "italic"),
+        )
+        self._popup_text.bind("<KeyRelease>", self._on_popup_edited)
+
+        scrollbar = ttk.Scrollbar(
+            text_wrap,
+            orient="vertical",
+            command=self._popup_text.yview,
+            style="Vertical.TScrollbar",
+        )
+        scrollbar.grid(row=0, column=1, sticky="ns", padx=(self.px(7), 0))
+        self._popup_text.configure(yscrollcommand=scrollbar.set)
+
+        buttons = tk.Frame(inner, bg=SURFACE)
+        buttons.grid(row=2, column=0, sticky="ew")
+        self._popup_primary = ttk.Button(
+            buttons,
+            text="Start dictation",
+            style="SmallAccent.TButton",
+            command=self._toggle_popup_dictation,
+            cursor="hand2",
+        )
+        self._popup_primary.pack(side="left")
+        close_btn = ttk.Button(
+            buttons,
+            text="Close",
+            style="SmallSecondary.TButton",
+            command=self._close_popup,
+            cursor="hand2",
+        )
+        close_btn.pack(side="right")
+        self._popup_copy_btn = ttk.Button(
+            buttons,
+            text="Copy",
+            style="SmallSecondary.TButton",
+            command=self._copy_popup_text,
+            cursor="hand2",
+            state=["disabled"],
+        )
+        self._popup_copy_btn.pack(side="right", padx=(0, self.px(8)))
+
+        hint = (
+            f"{self._hotkey_label} starts and stops dictation"
+            if self._hotkey_label
+            else "Press Escape to close"
+        )
+        tk.Label(
+            inner,
+            text=hint,
+            bg=SURFACE,
+            fg=MUTED_DIM,
+            font=("Segoe UI", 8),
+            anchor="w",
+        ).grid(row=3, column=0, sticky="ew", pady=(self.px(9), 0))
+
+        window.bind("<Escape>", self._close_popup)
+        window.bind("<Control-Return>", self._shortcut_popup_copy)
+
+        self._popup_window = window
+        self._popup_partial = ""
+        self._popup_transcript = ""
+        self._popup_accept_output = False
+        self._position_popup(window)
+        self._show_popup(window)
+
+    def _position_popup(self, window: tk.Toplevel) -> None:
+        window.update_idletasks()
+        width, height = self.px(480), self.px(360)
+        left, top, screen_w, screen_h = self._virtual_screen()
+        margin = self.px(16)
+        try:
+            pointer_x, pointer_y = self.root.winfo_pointerxy()
+        except tk.TclError:
+            pointer_x = left + screen_w // 2
+            pointer_y = top + screen_h // 2
+        x = pointer_x - width // 2
+        x = max(left + margin, min(x, left + screen_w - width - margin))
+        y = pointer_y + self.px(24)
+        if y + height > top + screen_h - margin:
+            y = pointer_y - height - self.px(24)
+        y = max(top + margin, min(y, top + screen_h - height - margin))
+        window.geometry(f"{width}x{height}+{x}+{y}")
+        window.minsize(self.px(360), self.px(260))
+
+    def _virtual_screen(self) -> tuple[int, int, int, int]:
+        if os.name == "nt":
+            try:
+                metrics = ctypes.windll.user32.GetSystemMetrics
+                x, y = metrics(76), metrics(77)
+                width, height = metrics(78), metrics(79)
+                if width > 0 and height > 0:
+                    return x, y, width, height
+            except Exception:
+                pass
+        return (
+            0,
+            0,
+            self.root.winfo_screenwidth(),
+            self.root.winfo_screenheight(),
+        )
+
+    def _set_popup_controls(self, busy: bool) -> None:
+        if busy:
+            self.add_btn.state(["disabled"])
+            self.model_combo.state(["disabled"])
+            self.language_combo.state(["disabled"])
+            self.mic_combo.state(["disabled"])
+            self.timestamps_check.state(["disabled"])
+            self.live_btn.state(["disabled"])
+        elif not (self._busy or self._live_active):
+            self.add_btn.state(["!disabled"])
+            self.model_combo.state(["readonly"])
+            self.language_combo.state(["readonly"])
+            self.mic_combo.state(["readonly"])
+            self.timestamps_check.state(["!disabled"])
+            self.live_btn.state(["!disabled"])
+        self._update_action_button()
+        self._update_transcript_buttons()
+
+    def _on_popup_status_resize(self, event: tk.Event) -> None:
+        if self._popup_status_label is not None:
+            self._popup_status_label.configure(
+                wraplength=max(self.px(160), event.width - self.px(20))
+            )
+
+    def _set_popup_status(self, message: str, tone: str = "muted") -> None:
+        colors = {
+            "muted": MUTED,
+            "accent": ACCENT,
+            "success": SUCCESS,
+            "warning": WARNING,
+            "error": ERROR,
+        }
+        dot_colors = {
+            "muted": MUTED_DIM,
+            "accent": ACCENT,
+            "success": SUCCESS,
+            "warning": WARNING,
+            "error": ERROR,
+        }
+        if self._popup_status_var is not None:
+            self._popup_status_var.set(message)
+        if self._popup_status_label is not None:
+            self._popup_status_label.configure(fg=colors.get(tone, MUTED))
+        if self._popup_dot is not None and self._popup_dot_id is not None:
+            self._popup_dot.itemconfigure(
+                self._popup_dot_id, fill=dot_colors.get(tone, MUTED_DIM)
+            )
+
+    def _popup_text_content(self) -> str:
+        widget = self._popup_text
+        if widget is None:
+            return ""
+        try:
+            return widget.get("1.0", "end-1c")
+        except tk.TclError:
+            return ""
+
+    def _set_popup_text_content(self, content: str, editable: bool) -> None:
+        widget = self._popup_text
+        if widget is None:
+            return
+        try:
+            widget.configure(state="normal")
+            widget.delete("1.0", "end")
+            if content:
+                widget.insert("1.0", content, "body")
+            widget.edit_reset()
+            widget.configure(state="normal" if editable else "disabled")
+        except tk.TclError:
+            pass
+
+    def _update_popup_controls(self) -> None:
+        primary = self._popup_primary
+        if primary is None:
+            return
+        content = self._popup_text_content().strip()
+        if self._popup_stopping:
+            primary.configure(text="Finishing…", style="SmallSecondary.TButton")
+            primary.state(["disabled"])
+        elif self._popup_active:
+            primary.configure(text="Stop", style="SmallDanger.TButton")
+            primary.state(["!disabled"])
+        else:
+            primary.configure(
+                text="Start again" if content else "Start dictation",
+                style="SmallAccent.TButton",
+            )
+            primary.state(["!disabled"])
+        if self._popup_copy_btn is not None:
+            self._popup_copy_btn.state(
+                ["!disabled"] if content else ["disabled"]
+            )
+
+    def _start_popup_capture(self) -> None:
+        if self._popup_window is None or self._popup_active:
+            return
+        if self._busy or self._live_active:
+            self._set_popup_status(
+                "Another transcription is running. Try again when it finishes.",
+                "warning",
+            )
+            self._update_popup_controls()
+            return
+
+        model_key = self.model_key_by_label.get(self.model_var.get(), DEFAULT_MODEL)
+        language = self.language_codes.get(self.language_var.get())
+        device_index = self._selected_microphone()
+        prefix = start_new_take(self._popup_text_content())
+
+        self._popup_session += 1
+        self._popup_transcript = prefix
+        self._popup_partial = ""
+        self._popup_language = language
+        self._popup_device_label = ""
+        self._popup_started = time.monotonic()
+        self._popup_stopping = False
+        self._popup_accept_output = True
+        self._popup_active = True
+        self._popup_stop = threading.Event()
+        self._set_popup_text_content(prefix, editable=False)
+        model_name = MODEL_NAMES.get(model_key, model_key)
+        self._set_popup_status(
+            f"Preparing the {model_name} model… first use may download it.",
+            "accent",
+        )
+        self._update_popup_controls()
+        self._set_popup_controls(True)
+        self._popup_thread = threading.Thread(
+            target=self._popup_worker,
+            args=(self._popup_session, model_key, language, device_index),
+            daemon=True,
+            name="sense-maker-popup",
+        )
+        self._popup_thread.start()
+        self._schedule_popup_tick()
+
+    def _stop_popup_capture(self) -> None:
+        if not self._popup_active or self._popup_stopping:
+            return
+        self._popup_stopping = True
+        if self._popup_stop is not None:
+            self._popup_stop.set()
+        self._set_popup_status("Finishing dictation…", "warning")
+        self._update_popup_controls()
+
+    def _popup_worker(
+        self,
+        session: int,
+        model_key: str,
+        language: str | None,
+        device_index: int | None,
+    ) -> None:
+        def emit(kind: str, *payload) -> None:
+            self.events.put((f"popup_{kind}", session, *payload))
+
+        if self._popup_stop is not None and self._popup_stop.is_set():
+            emit("done", 0.0, 0, 0.0, "Microphone", language)
+            return
+        try:
+            self._load_model_for_live(model_key)
+        except Exception as exc:
+            details = traceback.format_exc()
+            log.error("Could not load the model for quick dictation\n%s", details)
+            emit("error", str(exc).strip() or type(exc).__name__, details)
+            return
+
+        if self._popup_stop is not None and self._popup_stop.is_set():
+            emit("done", 0.0, 0, 0.0, "Microphone", language)
+            return
+
+        transcriber = LiveTranscriber(
+            self.engine,
+            emit,
+            language=language,
+            device_index=device_index,
+        )
+        try:
+            result = transcriber.run(self._popup_stop)
+        except Exception as exc:
+            details = traceback.format_exc()
+            log.error("Quick dictation failed\n%s", details)
+            emit("error", str(exc).strip() or type(exc).__name__, details)
+            return
+
+        emit(
+            "done",
+            result.elapsed,
+            result.segments,
+            result.captured_seconds,
+            result.device,
+            result.language,
+        )
+
+    def _popup_event_ok(self, session: int) -> bool:
+        window = self._popup_window
+        if (
+            session != self._popup_session
+            or not self._popup_accept_output
+            or window is None
+        ):
+            return False
+        try:
+            return bool(window.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def _on_popup_ready(
+        self, session: int, device: str, _rate: int, _channels: int
+    ) -> None:
+        if not self._popup_event_ok(session):
+            return
+        self._popup_device_label = device or "microphone"
+        self._set_popup_status(
+            f"Listening on {self._popup_device_label} · speak now", "accent"
+        )
+
+    def _on_popup_language(
+        self, session: int, code: str | None, _probability: float
+    ) -> None:
+        if not self._popup_event_ok(session) or not code:
+            return
+        self._popup_language = code
+
+    def _on_popup_segment(self, session: int, text: str) -> None:
+        if not self._popup_event_ok(session):
+            return
+        previous = self._popup_transcript
+        self._popup_transcript = join_transcript(previous, text)
+        self._popup_partial = ""
+        self._popup_replace_partial(self._popup_transcript[len(previous) :])
+        self._update_popup_controls()
+
+    def _popup_replace_partial(self, committed_addition: str) -> None:
+        widget = self._popup_text
+        if widget is None:
+            return
+        try:
+            at_bottom = widget.yview()[1] >= 0.995
+            widget.configure(state="normal")
+            ranges = widget.tag_ranges("popup_partial")
+            if ranges:
+                widget.delete(ranges[0], ranges[-1])
+            if committed_addition:
+                widget.insert("end", committed_addition, "body")
+            widget.configure(state="disabled")
+            if at_bottom:
+                widget.see("end")
+        except tk.TclError:
+            pass
+
+    def _on_popup_partial(self, session: int, text: str) -> None:
+        if not self._popup_event_ok(session):
+            return
+        self._popup_partial = text or ""
+        self._popup_show_partial()
+        self._update_popup_controls()
+
+    def _popup_show_partial(self) -> None:
+        widget = self._popup_text
+        if widget is None:
+            return
+        try:
+            at_bottom = widget.yview()[1] >= 0.995
+            widget.configure(state="normal")
+            ranges = widget.tag_ranges("popup_partial")
+            if ranges:
+                widget.delete(ranges[0], ranges[-1])
+            if self._popup_partial:
+                addition = join_transcript(
+                    self._popup_transcript, self._popup_partial
+                )[len(self._popup_transcript) :]
+                if addition:
+                    widget.insert(
+                        "end", addition, ("body", "popup_partial")
+                    )
+            widget.configure(state="disabled")
+            if at_bottom:
+                widget.see("end")
+        except tk.TclError:
+            pass
+
+    def _on_popup_done(
+        self,
+        session: int,
+        elapsed: float,
+        _segments: int,
+        _captured_seconds: float,
+        _device: str,
+        language: str | None,
+    ) -> None:
+        if session != self._popup_session:
+            return
+        accepted = self._popup_accept_output
+        window = self._popup_window
+        self._popup_active = False
+        self._popup_stopping = False
+        self._popup_stop = None
+        self._popup_thread = None
+        self._popup_accept_output = False
+        self._cancel_popup_timer()
+        if language:
+            self._popup_language = language
+        if window is not None and accepted:
+            self._popup_transcript = self._popup_transcript.rstrip()
+            self._set_popup_text_content(self._popup_transcript, editable=True)
+            words = (
+                len(re.findall(r"\S+", self._popup_transcript))
+                if self._popup_transcript.strip()
+                else 0
+            )
+            if words:
+                parts = ["Done"]
+                if language:
+                    parts.append(language_name(language))
+                parts.append(f"{words:,} words")
+                parts.append(_format_elapsed(elapsed))
+                self._set_popup_status(" · ".join(parts), "success")
+            else:
+                self._set_popup_status(
+                    "Done. No speech was detected.", "warning"
+                )
+            if self._popup_text is not None:
+                self._popup_text.focus_set()
+                self._popup_text.mark_set("insert", "end-1c")
+        elif window is not None:
+            self._set_popup_status("Ready. Press Start to dictate.", "muted")
+        self._update_popup_controls()
+        self._set_popup_controls(False)
+
+    def _on_popup_error(
+        self, session: int, message: str, details: str
+    ) -> None:
+        if session != self._popup_session:
+            return
+        accepted = self._popup_accept_output
+        window = self._popup_window
+        self._popup_active = False
+        self._popup_stopping = False
+        self._popup_stop = None
+        self._popup_thread = None
+        self._popup_accept_output = False
+        self._cancel_popup_timer()
+        log.error("Quick dictation error:\n%s", details)
+        if window is not None and accepted:
+            self._popup_transcript = self._popup_transcript.rstrip()
+            self._set_popup_text_content(self._popup_transcript, editable=True)
+            self._set_popup_status(f"Stopped: {message}", "error")
+        elif window is not None:
+            self._set_popup_status("Ready. Press Start to dictate.", "warning")
+        self._update_popup_controls()
+        self._set_popup_controls(False)
+
+    def _schedule_popup_tick(self) -> None:
+        window = self._popup_window
+        if window is None:
+            return
+        self._cancel_popup_timer()
+        self._popup_timer = window.after(1000, self._popup_tick)
+
+    def _popup_tick(self) -> None:
+        self._popup_timer = None
+        window = self._popup_window
+        if not self._popup_active or window is None:
+            return
+        try:
+            if not window.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if not self._popup_stopping and self._popup_device_label:
+            elapsed = _format_elapsed(time.monotonic() - self._popup_started)
+            words = (
+                len(re.findall(r"\S+", self._popup_transcript))
+                if self._popup_transcript.strip()
+                else 0
+            )
+            suffix = f" · {words:,} words" if words else ""
+            self._set_popup_status(
+                f"Listening on {self._popup_device_label} · {elapsed}{suffix}",
+                "accent",
+            )
+        try:
+            self._popup_timer = window.after(1000, self._popup_tick)
+        except tk.TclError:
+            self._popup_timer = None
+
+    def _cancel_popup_timer(self) -> None:
+        if self._popup_timer is None:
+            return
+        window = self._popup_window
+        if window is not None:
+            try:
+                window.after_cancel(self._popup_timer)
+            except tk.TclError:
+                pass
+        self._popup_timer = None
+
+    def _cancel_popup_copy_reset(self) -> None:
+        if self._popup_copy_reset is None:
+            return
+        window = self._popup_window
+        if window is not None:
+            try:
+                window.after_cancel(self._popup_copy_reset)
+            except tk.TclError:
+                pass
+        self._popup_copy_reset = None
+
+    def _copy_popup_text(self) -> None:
+        content = self._popup_text_content()
+        if not content.strip():
+            return
+        # Clipboard copy is also the foundation for part two: inserting the
+        # result into the application that had focus before the popup opened.
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(content)
+            self.root.update_idletasks()
+        except tk.TclError:
+            log.exception("Clipboard copy failed")
+            self._set_popup_status("Could not copy to the clipboard.", "error")
+            return
+        window = self._popup_window
+        if self._popup_copy_btn is not None:
+            self._popup_copy_btn.configure(text="Copied")
+        self._cancel_popup_copy_reset()
+        if window is not None:
+            self._popup_copy_reset = window.after(
+                1500, self._reset_popup_copy_label
+            )
+
+    def _reset_popup_copy_label(self) -> None:
+        self._popup_copy_reset = None
+        if self._popup_copy_btn is not None:
+            try:
+                self._popup_copy_btn.configure(text="Copy")
+            except tk.TclError:
+                pass
+
+    def _shortcut_popup_copy(self, _event: tk.Event) -> str:
+        self._copy_popup_text()
+        return "break"
+
+    def _on_popup_edited(self, _event: tk.Event | None = None) -> None:
+        self._update_popup_controls()
+
+    def _close_popup(self, _event: tk.Event | None = None) -> None:
+        self._popup_accept_output = False
+        self._cancel_popup_timer()
+        self._cancel_popup_copy_reset()
+        if self._popup_stop is not None:
+            self._popup_stop.set()
+        self._popup_stopping = self._popup_active
+        window = self._popup_window
+        self._popup_window = None
+        self._popup_text = None
+        self._popup_primary = None
+        self._popup_copy_btn = None
+        self._popup_status_label = None
+        self._popup_status_var = None
+        self._popup_dot = None
+        self._popup_dot_id = None
+        self._popup_partial = ""
+        self._popup_transcript = ""
+        if window is not None:
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+
+    def _shutdown_popup(self) -> None:
+        self._popup_accept_output = False
+        self._cancel_popup_timer()
+        self._cancel_popup_copy_reset()
+        if self._popup_stop is not None:
+            self._popup_stop.set()
+        thread = self._popup_thread
+        self._popup_thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.5)
+        self._popup_active = False
+        self._popup_stopping = False
+        self._popup_stop = None
+        window = self._popup_window
+        self._popup_window = None
+        self._popup_text = None
+        self._popup_primary = None
+        self._popup_copy_btn = None
+        self._popup_status_label = None
+        self._popup_status_var = None
+        self._popup_dot = None
+        self._popup_dot_id = None
+        if window is not None:
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+
     # --- Event pump ----------------------------------------------------------
     def _poll_events(self) -> None:
         if self._closing:
@@ -3040,6 +3874,22 @@ class TranscriberApp:
             )
         elif kind == "live_error":
             self._on_live_error(event[1], event[2])
+        elif kind == "hotkey":
+            self._toggle_popup_dictation()
+        elif kind == "popup_ready":
+            self._on_popup_ready(event[1], event[2], event[3], event[4])
+        elif kind == "popup_language":
+            self._on_popup_language(event[1], event[2], event[3])
+        elif kind == "popup_segment":
+            self._on_popup_segment(event[1], event[2])
+        elif kind == "popup_partial":
+            self._on_popup_partial(event[1], event[2])
+        elif kind == "popup_done":
+            self._on_popup_done(
+                event[1], event[2], event[3], event[4], event[5], event[6]
+            )
+        elif kind == "popup_error":
+            self._on_popup_error(event[1], event[2], event[3])
 
     def _on_file_start(self, job_id: str, index: int, total: int) -> None:
         job = self._jobs_by_id.get(job_id)
@@ -3283,6 +4133,10 @@ class TranscriberApp:
             ):
                 return
             self._finalize_live_on_close()
+        self._shutdown_popup()
+        if self._hotkey is not None:
+            self._hotkey.stop()
+            self._hotkey = None
         self._commit_edit()
         self._save_history()
         self._closing = True

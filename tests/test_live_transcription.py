@@ -13,6 +13,7 @@ from live_transcription import (
     prompt_tail,
     quiet_cut_point,
     speech_bounds,
+    start_new_take,
 )
 
 
@@ -51,6 +52,20 @@ class PromptTests(unittest.TestCase):
         tail = prompt_tail(text, limit=20)
         self.assertLessEqual(len(tail), 20)
         self.assertTrue(tail.startswith(("alpha", "omega")))
+
+
+class NewTakeTests(unittest.TestCase):
+    def test_empty_text_has_no_prefix(self):
+        self.assertEqual(start_new_take(""), "")
+
+    def test_whitespace_only_has_no_prefix(self):
+        self.assertEqual(start_new_take("  \n "), "")
+
+    def test_existing_text_starts_a_new_line(self):
+        self.assertEqual(start_new_take("Hello"), "Hello\n")
+
+    def test_trailing_whitespace_is_normalised(self):
+        self.assertEqual(start_new_take("Hello\n\n"), "Hello\n")
 
 
 class CommitPointTests(unittest.TestCase):

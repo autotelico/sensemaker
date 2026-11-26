@@ -44,7 +44,7 @@ Installed app data lives in `%LOCALAPPDATA%\SenseMaker`:
 
 - `models\` — verified, pinned Whisper models
 - `transcript_history.dat` — optional DPAPI-encrypted transcript history,
-  including completed live sessions
+  including completed live sessions; quick dictation popups are never saved
 - `settings.json` — non-sensitive preferences, including history retention
 - `sensemaker.log` — rotated diagnostic log with directory paths redacted
 
@@ -112,6 +112,29 @@ or a smaller model keeps previews close to real time; a large model on the CPU
 can fall behind continuous speech. Live transcripts are plain text; the
 **Include timestamps** option applies to file transcription.
 
+### Quick dictation popup
+
+Press `Ctrl+Alt+Space` anywhere on your desktop, or click **Quick dictation
+popup** under the microphone picker. SenseMaker opens a small always-on-top
+window and starts listening with the selected model, language, and microphone.
+
+- The phrase currently being recognised appears in grey; completed phrases are
+  added to the editable text box as you speak.
+- Press `Ctrl+Alt+Space` again or click **Stop** to finish. The text stays
+  editable, and **Copy** (or `Ctrl+Enter`) puts it on the clipboard.
+- Pressing `Escape` closes the popup and stops listening.
+- Press the shortcut again after finishing to dictate another take; it is
+  appended on a new line.
+- If another program already uses `Ctrl+Alt+Space`, SenseMaker tries
+  `Ctrl+Shift+Space` and then `Ctrl+Alt+D`. The link shows the active shortcut.
+- Popup dictations are not added to the audio library or transcript history.
+  The text exists only in the popup until you copy it.
+
+The global shortcut works while SenseMaker is running, even if the main window
+is minimized or behind other applications. Inserting the text automatically
+into the application that had focus is planned for a later update and is not
+implemented yet.
+
 ### Keyboard shortcuts
 
 | Shortcut | Action |
@@ -120,6 +143,7 @@ can fall behind continuous speech. Live transcripts are plain text; the
 | `Ctrl+Enter` | Transcribe queued files |
 | `Ctrl+Shift+C` | Copy the selected transcript |
 | `Ctrl+L` | Start or stop live transcription |
+| `Ctrl+Alt+Space` | Open or stop the quick dictation popup (system-wide) |
 
 ## Running from source
 
@@ -199,6 +223,8 @@ Without one, SenseMaker uses the CPU.
 - GPU acceleration requires a separately installed NVIDIA CUDA runtime; it is
   not bundled. Without one, SenseMaker runs on the CPU.
 - To force CPU mode, set the environment variable `WHISPER_DEVICE=cpu`.
+- To skip registering the system-wide quick dictation shortcut, set
+  `SENSEMAKER_NO_HOTKEY=1`; the popup link still works.
 - For development, `SENSEMAKER_DATA_DIR` can point data at another folder.
 
 ## License

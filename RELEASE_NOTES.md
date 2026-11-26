@@ -5,6 +5,15 @@ Private, on-device audio transcription for Windows 10/11 (x64).
 > **Not releasable yet.** The current CTranslate2 wheel embeds proprietary Intel
 > oneMKL/OpenMP and NVIDIA cuDNN. Do not publish this build; see `RELEASE.md`.
 
+## Highlights
+
+- Transcribe audio and video files locally.
+- Live microphone transcription with committed text and an in-progress preview.
+- Quick dictation popup from a system-wide shortcut (`Ctrl+Alt+Space`), with an
+  editable text box and one-click copy.
+- Optional DPAPI-encrypted transcript history for files and library live
+  sessions; popup dictations are never saved.
+
 ## Download
 
 - `SenseMaker-Setup-1.0.0.exe` — per-user installer
@@ -21,6 +30,8 @@ that the publisher is unrecognized. You can verify the download against
 
 - Audio is decoded and transcribed on your computer. Nothing is uploaded.
 - Live microphone audio is transcribed in memory and is never written to disk.
+- Quick dictation popup transcripts are never written to the library or
+  history; only Copy places them on the Windows clipboard.
 - SenseMaker contacts the network only to download a pinned Whisper model from
   Hugging Face when that model is not already cached locally.
 - Media decoding is restricted to local files; FFmpeg network protocols are
