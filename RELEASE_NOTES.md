@@ -20,6 +20,7 @@ that the publisher is unrecognized. You can verify the download against
 ## Privacy
 
 - Audio is decoded and transcribed on your computer. Nothing is uploaded.
+- Live microphone audio is transcribed in memory and is never written to disk.
 - SenseMaker contacts the network only to download a pinned Whisper model from
   Hugging Face when that model is not already cached locally.
 - Media decoding is restricted to local files; FFmpeg network protocols are

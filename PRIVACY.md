@@ -1,6 +1,6 @@
 # SenseMaker Privacy Notice
 
-**Version 1.0 · Effective 2026-11-23**
+**Version 1.1 · Effective 2026-11-26**
 
 SenseMaker is a local desktop application for transcribing audio. This notice
 describes what it does with data on your computer.
@@ -8,11 +8,27 @@ describes what it does with data on your computer.
 ## No audio uploads
 
 Audio and video files are decoded and transcribed on your computer using a
-local Whisper model. SenseMaker does not upload your recordings, extracts, or
-transcripts to a server. There is no account system and no analytics or
-telemetry. ONNX Runtime (used for voice-activity detection) has optional
-telemetry; SenseMaker disables it at startup with `ORT_DISABLE_TELEMETRY=1` and
-`onnxruntime.disable_telemetry_events()`.
+local Whisper model. SenseMaker does not upload your recordings, microphone
+audio, extracts, or transcripts to a server. There is no account system and no
+analytics or telemetry. ONNX Runtime (used for voice-activity detection) has
+optional telemetry; SenseMaker disables it at startup with
+`ORT_DISABLE_TELEMETRY=1` and `onnxruntime.disable_telemetry_events()`.
+
+## Live microphone
+
+When you start a live transcription, SenseMaker records from the microphone you
+selected through the Windows audio input API. The audio is held in memory,
+converted to 16 kHz mono, and sent only to the local Whisper model.
+
+- Microphone audio is **not written to disk** and is not uploaded.
+- Only the resulting transcript is saved, and only while **Keep transcript
+  history on this PC** is enabled.
+- The microphone is released when you stop the session or close the app.
+- Windows may ask for microphone permission the first time. Other applications
+  and Windows settings can also access the device; SenseMaker cannot control
+  that.
+- Live transcription is visible in the audio library as a normal transcript
+  entry. It has no source file to reopen or retry.
 
 ## Network access
 
@@ -36,10 +52,10 @@ SenseMaker stores its data under `%LOCALAPPDATA%\SenseMaker` (or the project
 folder when run from source):
 
 - **Models** — the downloaded Whisper model files you selected.
-- **Transcript history** — optional. When enabled, completed transcripts and
-  references to their source files are stored in
-  `transcript_history.dat`. The file is encrypted with Windows DPAPI for your
-  Windows account, so other Windows accounts cannot read it. It is not
+- **Transcript history** — optional. When enabled, completed transcripts
+  (including live microphone sessions) and references to their source files are
+  stored in `transcript_history.dat`. The file is encrypted with Windows DPAPI
+  for your Windows account, so other Windows accounts cannot read it. It is not
   encrypted against malware or programs running as your Windows user.
 - **Settings** — a small `settings.json` file containing your history-retention
   preference. It contains no transcript text.

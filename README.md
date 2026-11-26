@@ -4,9 +4,9 @@
 [![Latest release](https://img.shields.io/github/v/release/autotelico/sensemaker?include_prereleases)](https://github.com/autotelico/sensemaker/releases)
 
 **SenseMaker** is a private, on-device audio transcription app for Windows.
-It uses OpenAI's Whisper models through `faster-whisper`; audio is processed
-locally and is never uploaded. It is free software under
-[GPL-3.0-or-later](LICENSE).
+It uses OpenAI's Whisper models through `faster-whisper` to transcribe audio
+files and live microphone speech; audio is processed locally and is never
+uploaded. It is free software under [GPL-3.0-or-later](LICENSE).
 
 > **Release status:** the source is GPL-3.0-or-later, but no compliant binary is
 > published yet. The current CTranslate2 wheel embeds proprietary Intel
@@ -43,7 +43,8 @@ distributable; see [GPU acceleration](#gpu-acceleration) and `RELEASE.md`.
 Installed app data lives in `%LOCALAPPDATA%\SenseMaker`:
 
 - `models\` — verified, pinned Whisper models
-- `transcript_history.dat` — optional DPAPI-encrypted transcript history
+- `transcript_history.dat` — optional DPAPI-encrypted transcript history,
+  including completed live sessions
 - `settings.json` — non-sensitive preferences, including history retention
 - `sensemaker.log` — rotated diagnostic log with directory paths redacted
 
@@ -89,6 +90,28 @@ Supported inputs include WAV, MP3, M4A, M4B, AAC, FLAC, OGG, OPUS, WMA, AIFF,
 AMR, AC3, MP2, and MPGA. Video files with audio tracks — MP4, M4V, MOV, MKV,
 WebM, AVI, WMV, FLV, and MPEG — are accepted as well.
 
+### Live transcription
+
+1. Pick a model and language, then choose a microphone under **Live
+   microphone**.
+2. Click **Live transcription** (or press `Ctrl+L`) and start speaking.
+3. The phrase currently being recognised appears in grey. Once a short pause is
+   detected, the phrase is committed and the next one is shown in preview.
+4. Click **Stop live** (or press `Ctrl+L` again) to finish. The session appears
+   in the audio library like a file, so its transcript can be edited, copied,
+   or removed.
+
+Live audio is captured in memory and converted to 16 kHz mono for the model. It
+is never written to disk or uploaded; only the transcript is kept when history
+is enabled. The language can stay on **Auto-detect**; after the first confident
+phrase SenseMaker keeps using the detected language for the rest of the
+session.
+
+Live transcription uses the same local model as file transcription. A fast GPU
+or a smaller model keeps previews close to real time; a large model on the CPU
+can fall behind continuous speech. Live transcripts are plain text; the
+**Include timestamps** option applies to file transcription.
+
 ### Keyboard shortcuts
 
 | Shortcut | Action |
@@ -96,6 +119,7 @@ WebM, AVI, WMV, FLV, and MPEG — are accepted as well.
 | `Ctrl+O` | Add audio files |
 | `Ctrl+Enter` | Transcribe queued files |
 | `Ctrl+Shift+C` | Copy the selected transcript |
+| `Ctrl+L` | Start or stop live transcription |
 
 ## Running from source
 

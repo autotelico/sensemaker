@@ -573,6 +573,34 @@ class TranscriptionEngine:
         )
         return segments, info
 
+    def transcribe_array(
+        self,
+        audio: np.ndarray,
+        language: str | None = None,
+        beam_size: int = 5,
+        initial_prompt: str | None = None,
+    ):
+        """Transcribe an in-memory 16 kHz mono float array.
+
+        Live transcription calls this with short, silence-trimmed phrases, so
+        no VAD or timestamp decoding is needed and latency stays low.
+        """
+        if self._loaded is None:
+            raise RuntimeError("No Whisper model is loaded.")
+
+        return self._loaded.model.transcribe(
+            audio,
+            language=language,
+            task="transcribe",
+            beam_size=beam_size,
+            best_of=beam_size,
+            temperature=0.0,
+            vad_filter=False,
+            without_timestamps=True,
+            condition_on_previous_text=False,
+            initial_prompt=initial_prompt,
+        )
+
 
 def language_name(code: str | None) -> str:
     if not code:

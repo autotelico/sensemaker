@@ -22,6 +22,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from audio_capture import list_input_devices
 from secure_store import (
     SETTINGS_FILENAME,
     HistoryStore,
@@ -29,6 +30,8 @@ from secure_store import (
     SecureStoreError,
     atomic_write_json,
 )
+# whisper_engine prepares the CUDA DLL search path before faster-whisper is
+# imported, so it must come before live_transcription.
 from whisper_engine import (
     DATA_DIR,
     DEFAULT_MODEL,
@@ -45,6 +48,7 @@ from whisper_engine import (
     language_name,
     looks_like_gpu_error,
 )
+from live_transcription import LiveTranscriber, join_transcript
 
 APP_NAME = "SenseMaker"
 SETTINGS_PATH = DATA_DIR / SETTINGS_FILENAME
@@ -143,13 +147,22 @@ class AudioJob:
     completed_at: float | None = None
     added_at: float = field(default_factory=time.time)
     size: int = 0
+    kind: str = "file"  # file | live
 
     @property
     def name(self) -> str:
+        if self.kind == "live":
+            try:
+                stamp = time.strftime("%b %d, %H:%M", time.localtime(self.added_at))
+            except (ValueError, OSError, OverflowError):
+                stamp = "session"
+            return f"Live · {stamp}"
         return self.path.name or str(self.path)
 
     @property
     def exists(self) -> bool:
+        if self.kind == "live":
+            return False
         try:
             return self.path.is_file()
         except OSError:
@@ -159,7 +172,8 @@ class AudioJob:
         return {
             "id": self.id,
             "name": self.name,
-            "path": str(self.path),
+            "path": "" if self.kind == "live" else str(self.path),
+            "kind": self.kind,
             "transcript": self.transcript,
             "language": self.language,
             "duration": self.duration,
@@ -177,9 +191,20 @@ class AudioJob:
     def from_record(cls, record: object) -> "AudioJob | None":
         if not isinstance(record, dict):
             return None
+        kind = record.get("kind")
+        if kind not in ("file", "live"):
+            kind = "file"
         path_value = record.get("path")
-        if not isinstance(path_value, str) or not path_value.strip():
-            return None
+        if kind == "live":
+            path = (
+                Path(path_value)
+                if isinstance(path_value, str) and path_value.strip()
+                else Path()
+            )
+        else:
+            if not isinstance(path_value, str) or not path_value.strip():
+                return None
+            path = Path(path_value)
         status = record.get("status")
         if status not in ("done", "error", "cancelled"):
             return None
@@ -212,7 +237,7 @@ class AudioJob:
 
         return cls(
             id=job_id,
-            path=Path(path_value),
+            path=path,
             status=status,
             transcript=transcript,
             language=text("language"),
@@ -225,6 +250,7 @@ class AudioJob:
             completed_at=completed_at,
             added_at=number("added_at") or completed_at or time.time(),
             size=int(number("size") or 0),
+            kind=kind,
         )
 
 
@@ -312,6 +338,16 @@ class TranscriberApp:
         self._text_editable = False
         self._placeholder_message = ""
         self._file_started = 0.0
+        self._live_active = False
+        self._live_stopping = False
+        self._live_job_id: str | None = None
+        self._live_thread: threading.Thread | None = None
+        self._live_stop: threading.Event | None = None
+        self._live_timer: str | None = None
+        self._live_started = 0.0
+        self._live_partial = ""
+        self._live_device_label = ""
+        self._mic_index_by_label: dict[str, int | None] = {}
         self._history = HistoryStore(DATA_DIR)
         self._retain_history = True
         self._history_error: str | None = None
@@ -325,6 +361,7 @@ class TranscriberApp:
 
         self.model_var = tk.StringVar(value=MODEL_LABELS[DEFAULT_MODEL])
         self.language_var = tk.StringVar(value="Auto-detect")
+        self.mic_label_var = tk.StringVar(value="Default microphone")
         self.timestamps_var = tk.BooleanVar(value=False)
         self.keep_history_var = tk.BooleanVar(value=self._retain_history)
         self.status_var = tk.StringVar(value="Add audio files to start.")
@@ -432,6 +469,30 @@ class TranscriberApp:
                 foreground=[("disabled", MUTED_DIM)],
                 bordercolor=[("active", "#334456")],
             )
+
+        style.configure(
+            "SmallDanger.TButton",
+            background="#3a1c22",
+            foreground=ERROR,
+            borderwidth=1,
+            bordercolor="#5a2a33",
+            lightcolor="#3a1c22",
+            darkcolor="#3a1c22",
+            relief="flat",
+            padding=(self.px(12), self.px(7)),
+            focusthickness=0,
+            font=("Segoe UI", 9, "bold"),
+        )
+        style.map(
+            "SmallDanger.TButton",
+            background=[
+                ("disabled", SURFACE),
+                ("pressed", "#2f171c"),
+                ("active", "#4b242c"),
+            ],
+            foreground=[("disabled", MUTED_DIM)],
+            bordercolor=[("active", "#7a3a46"), ("disabled", BORDER)],
+        )
 
         style.configure(
             "Dark.TCombobox",
@@ -732,14 +793,46 @@ class TranscriberApp:
             font=("Segoe UI", 8),
         ).pack(side="left", padx=(self.px(10), 0))
 
+        source_row = tk.Frame(card, bg=SURFACE)
+        source_row.pack(fill="x", padx=self.px(18), pady=(0, self.px(9)))
         self.add_btn = ttk.Button(
-            card,
+            source_row,
             text="Add audio files",
             style="SmallAccent.TButton",
             command=self.choose_files,
             cursor="hand2",
         )
-        self.add_btn.pack(fill="x", padx=self.px(18), pady=(0, self.px(12)))
+        self.add_btn.pack(side="left", fill="x", expand=True)
+        self.live_btn = ttk.Button(
+            source_row,
+            text="Live transcription",
+            style="SmallSecondary.TButton",
+            command=self._toggle_live,
+            cursor="hand2",
+        )
+        self.live_btn.pack(side="left", fill="x", padx=(self.px(8), 0))
+
+        mic_row = tk.Frame(card, bg=SURFACE)
+        mic_row.pack(fill="x", padx=self.px(18), pady=(0, self.px(11)))
+        tk.Label(
+            mic_row,
+            text="LIVE MICROPHONE",
+            bg=SURFACE,
+            fg=MUTED,
+            font=("Segoe UI", 8, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        mic_labels = self._load_microphone_labels()
+        self.mic_combo = ttk.Combobox(
+            mic_row,
+            textvariable=self.mic_label_var,
+            values=mic_labels,
+            state="readonly",
+            style="Dark.TCombobox",
+            font=("Segoe UI", 9),
+            height=8,
+        )
+        self.mic_combo.pack(fill="x", pady=(self.px(5), 0))
 
         list_wrap = tk.Frame(card, bg=SURFACE)
         list_wrap.pack(
@@ -807,6 +900,31 @@ class TranscriberApp:
         privacy_link.bind("<Button-1>", lambda _event: self._open_privacy_dialog())
 
         self.root.bind_all("<MouseWheel>", self._on_mouse_wheel, add="+")
+
+    def _load_microphone_labels(self) -> list[str]:
+        """Fill the microphone picker without making startup depend on audio."""
+        self._mic_index_by_label = {"Default microphone": None}
+        labels = ["Default microphone"]
+        try:
+            devices = list_input_devices()
+        except Exception:
+            log.warning("Could not enumerate microphones", exc_info=True)
+            return labels
+        for device in devices:
+            if device.index is None:
+                continue
+            name = (device.name or "").strip() or f"Microphone {device.index + 1}"
+            label = name
+            suffix = 2
+            while label in self._mic_index_by_label:
+                label = f"{name} ({suffix})"
+                suffix += 1
+            labels.append(label)
+            self._mic_index_by_label[label] = device.index
+        return labels
+
+    def _selected_microphone(self) -> int | None:
+        return self._mic_index_by_label.get(self.mic_label_var.get())
 
     def _on_library_configure(self, _event: tk.Event | None = None) -> None:
         self.list_canvas.configure(scrollregion=self.list_canvas.bbox("all"))
@@ -946,13 +1064,15 @@ class TranscriberApp:
         tk.Label(
             inner,
             text=(
-                "SenseMaker processes audio locally. Your recordings and transcripts "
-                "are not uploaded. Model files are downloaded from Hugging Face; those "
-                "requests include network metadata and the model name, but never audio "
-                "or transcript content.\n\n"
-                "When history is on, completed transcripts and file references are "
-                "encrypted with Windows DPAPI and readable by this Windows account. "
-                "Logs are limited in size and directory paths are redacted."
+                "SenseMaker processes audio locally. Your recordings, live microphone "
+                "audio, and transcripts are not uploaded. Model files are downloaded "
+                "from Hugging Face; those requests include network metadata and the "
+                "model name, but never audio or transcript content. Live microphone "
+                "audio is transcribed in memory and never written to disk.\n\n"
+                "When history is on, completed transcripts (including live sessions) "
+                "and source references are encrypted with Windows DPAPI and readable by "
+                "this Windows account. Logs are limited in size and directory paths are "
+                "redacted."
             ),
             bg=SURFACE,
             fg=MUTED,
@@ -1088,7 +1208,7 @@ class TranscriberApp:
             self._set_status("History turned on. Encrypted history will be saved.", "muted")
 
     def _clear_all_history(self) -> None:
-        if self._busy:
+        if self._busy or self._live_active:
             messagebox.showinfo(
                 "Privacy & history",
                 "Wait for the current transcription to finish before clearing history.",
@@ -1146,14 +1266,17 @@ class TranscriberApp:
 
         jobs = self._ordered_jobs()
         total = len(jobs)
-        self.library_count_var.set(
-            "0 files" if total == 0 else f"{total} file{'s' if total != 1 else ''}"
-        )
+        if total == 0:
+            self.library_count_var.set("0 files")
+        elif all(job.kind == "file" for job in jobs):
+            self.library_count_var.set(f"{total} file{'s' if total != 1 else ''}")
+        else:
+            self.library_count_var.set(f"{total} item{'s' if total != 1 else ''}")
 
         if not jobs:
             tk.Label(
                 self.library_list,
-                text="No audio yet.\nAdd files to transcribe them.",
+                text="No audio yet.\nAdd files or start a live transcription.",
                 bg=SURFACE,
                 fg=MUTED_DIM,
                 font=("Segoe UI", 9),
@@ -1243,7 +1366,7 @@ class TranscriberApp:
     def _job_meta(self, job: AudioJob) -> str:
         label = {
             "queued": "Queued",
-            "running": "Transcribing",
+            "running": "Listening" if job.kind == "live" else "Transcribing",
             "done": "Done",
             "error": "Failed",
             "cancelled": "Cancelled",
@@ -1261,7 +1384,7 @@ class TranscriberApp:
             when = self._format_when(job.completed_at)
             if when:
                 bits.append(when)
-            if not job.exists:
+            if job.kind != "live" and not job.exists:
                 bits.append("file missing")
 
         return " · ".join(bits)
@@ -1687,6 +1810,11 @@ class TranscriberApp:
             lmargin2=0,
         )
         self.text.tag_configure("error", foreground=ERROR)
+        self.text.tag_configure(
+            "live_partial",
+            foreground=MUTED,
+            font=("Segoe UI", 11, "italic"),
+        )
 
         scrollbar = ttk.Scrollbar(
             text_wrap,
@@ -1726,6 +1854,7 @@ class TranscriberApp:
         self.root.bind("<Control-o>", self._shortcut_open)
         self.root.bind("<Control-Return>", self._shortcut_transcribe)
         self.root.bind("<Control-Shift-C>", self._shortcut_copy)
+        self.root.bind("<Control-l>", self._shortcut_live)
 
     # --- Window / status -----------------------------------------------------
     def _set_status(self, message: str, tone: str = "muted") -> None:
@@ -1772,7 +1901,7 @@ class TranscriberApp:
 
     # --- File selection ------------------------------------------------------
     def choose_files(self) -> None:
-        if self._busy:
+        if self._busy or self._live_active:
             return
         selected = filedialog.askopenfilenames(
             parent=self.root,
@@ -1903,7 +2032,8 @@ class TranscriberApp:
             self.transcript_meta_var.set("")
             self._placeholder_message = (
                 "Your transcript will appear here.\n"
-                "Add audio files, then press Transcribe."
+                "Add audio files, then press Transcribe.\n"
+                "Or start a live transcription and speak."
             )
             self._set_text_state(False)
             self.root.title(APP_NAME)
@@ -1912,7 +2042,9 @@ class TranscriberApp:
             self.transcript_meta_var.set(self._job_detail(job))
             self._placeholder_message = ""
             if job.status == "running":
-                self._placeholder_message = "Transcribing…"
+                self._placeholder_message = (
+                    "Listening…" if job.kind == "live" else "Transcribing…"
+                )
             elif job.status == "queued":
                 self._placeholder_message = "Queued. Press Transcribe to start."
             elif not job.transcript.strip():
@@ -1926,6 +2058,13 @@ class TranscriberApp:
                 job.status == "error" and bool(job.transcript)
             )
             self._set_text_state(editable)
+            if (
+                job.kind == "live"
+                and job.status == "running"
+                and job.id == self._live_job_id
+                and self._live_partial
+            ):
+                self._insert_live_partial(job)
             self.root.title(f"{job.name} · {APP_NAME}")
 
         if job is not None and job.status == "running":
@@ -1939,11 +2078,17 @@ class TranscriberApp:
     def _job_detail(self, job: AudioJob) -> str:
         label = {
             "queued": "Queued",
-            "running": "Transcribing",
+            "running": "Listening" if job.kind == "live" else "Transcribing",
             "done": "Done",
             "error": "Failed",
             "cancelled": "Cancelled",
         }.get(job.status, job.status.title())
+        if (
+            job.status == "running"
+            and job.kind == "live"
+            and not self._live_device_label
+        ):
+            label = "Starting"
         bits = [label]
 
         if job.status in ("done", "error", "cancelled"):
@@ -1960,8 +2105,15 @@ class TranscriberApp:
             when = self._format_when(job.completed_at)
             if when:
                 bits.append(when)
-            if not job.exists:
+            if job.kind != "live" and not job.exists:
                 bits.append("original file not found")
+        elif job.status == "running" and job.kind == "live":
+            if job.id == self._live_job_id and self._live_active:
+                if self._live_device_label:
+                    bits.append(self._live_device_label)
+                bits.append(
+                    f"{_format_elapsed(time.monotonic() - self._live_started)} elapsed"
+                )
         elif job.status == "queued" and job.size:
             bits.append(format_bytes(job.size))
 
@@ -1983,7 +2135,7 @@ class TranscriberApp:
 
         if job is None:
             self.remove_btn.state(["disabled"])
-        elif self._busy:
+        elif self._busy or self._live_active:
             self.remove_btn.state(["disabled"])
         else:
             self.remove_btn.state(["!disabled"])
@@ -1991,6 +2143,7 @@ class TranscriberApp:
         can_retry = (
             job is not None
             and not self._busy
+            and not self._live_active
             and job.status in ("error", "cancelled")
             and job.exists
         )
@@ -2080,7 +2233,7 @@ class TranscriberApp:
             pass
 
     def remove_selected(self) -> None:
-        if self._busy:
+        if self._busy or self._live_active:
             return
         job = self._selected_job()
         if job is None:
@@ -2110,7 +2263,7 @@ class TranscriberApp:
         self._set_status("Removed from the library.", "muted")
 
     def retry_selected(self) -> None:
-        if self._busy:
+        if self._busy or self._live_active:
             return
         job = self._selected_job()
         if job is None or job.status not in ("error", "cancelled"):
@@ -2150,6 +2303,11 @@ class TranscriberApp:
         self.copy_transcript()
         return "break"
 
+    def _shortcut_live(self, _event: tk.Event) -> str:
+        if not self._busy:
+            self._toggle_live()
+        return "break"
+
     # --- Busy state ----------------------------------------------------------
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -2158,6 +2316,8 @@ class TranscriberApp:
             self.model_combo.state(["disabled"])
             self.language_combo.state(["disabled"])
             self.timestamps_check.state(["disabled"])
+            self.mic_combo.state(["disabled"])
+            self.live_btn.state(["disabled"])
             self.cancel_btn.grid()
             self.cancel_btn.state(["!disabled"])
         else:
@@ -2165,12 +2325,18 @@ class TranscriberApp:
             self.model_combo.state(["readonly"])
             self.language_combo.state(["readonly"])
             self.timestamps_check.state(["!disabled"])
+            self.mic_combo.state(["readonly"])
+            self.live_btn.state(["!disabled"])
             self.cancel_btn.grid_remove()
             self.cancel_btn.state(["!disabled"])
         self._update_action_button()
         self._update_transcript_buttons()
 
     def _update_action_button(self) -> None:
+        if self._live_active:
+            self.transcribe_btn.configure(text="Live session running")
+            self.transcribe_btn.state(["disabled"])
+            return
         if self._busy:
             self.transcribe_btn.configure(text="Transcribing…")
             self.transcribe_btn.state(["disabled"])
@@ -2186,7 +2352,7 @@ class TranscriberApp:
 
     # --- Transcription -------------------------------------------------------
     def start_transcription(self) -> None:
-        if self._busy:
+        if self._busy or self._live_active:
             return
         queued = [job.id for job in self._ordered_jobs() if job.status == "queued"]
         if not queued:
@@ -2196,7 +2362,7 @@ class TranscriberApp:
         self._start_batch(queued)
 
     def _start_batch(self, job_ids: list[str]) -> None:
-        if self._busy:
+        if self._busy or self._live_active:
             return
         ids = [job_id for job_id in job_ids if job_id in self._jobs_by_id]
         if not ids:
@@ -2442,6 +2608,365 @@ class TranscriberApp:
             )
         )
 
+    # --- Live transcription --------------------------------------------------
+    def _toggle_live(self) -> None:
+        if self._live_active:
+            self.stop_live()
+        else:
+            self.start_live()
+
+    def start_live(self) -> None:
+        if self._busy or self._live_active:
+            return
+        model_key = self.model_key_by_label.get(self.model_var.get(), DEFAULT_MODEL)
+        language = self.language_codes.get(self.language_var.get())
+        device_index = self._selected_microphone()
+
+        self._commit_edit()
+        job_id = uuid.uuid4().hex
+        job = AudioJob(
+            id=job_id,
+            path=Path(),
+            status="running",
+            model_key=model_key,
+            kind="live",
+            language=language,
+            added_at=time.time(),
+        )
+        self._jobs.append(job)
+        self._jobs_by_id[job_id] = job
+        self._selected_id = job_id
+        self._live_job_id = job_id
+        self._live_partial = ""
+        self._live_device_label = ""
+        self._live_started = time.monotonic()
+        self._live_stopping = False
+        self._live_stop = threading.Event()
+        self._render_selected()
+        self._refresh_library()
+        self._set_live(True)
+        self._set_badge("LOADING", "warning")
+        self._set_status("Preparing live transcription…", "accent")
+        self._start_indeterminate()
+        self._live_thread = threading.Thread(
+            target=self._live_worker,
+            args=(model_key, language, device_index),
+            daemon=True,
+            name="sense-maker-live",
+        )
+        self._live_thread.start()
+        self._live_timer = self.root.after(1000, self._live_tick)
+
+    def stop_live(self) -> None:
+        if not self._live_active or self._live_stopping:
+            return
+        self._live_stopping = True
+        if self._live_stop is not None:
+            self._live_stop.set()
+        self.live_btn.state(["disabled"])
+        self._set_status("Finishing live transcription…", "warning")
+
+    def _set_live(self, active: bool) -> None:
+        self._live_active = active
+        if active:
+            self.add_btn.state(["disabled"])
+            self.model_combo.state(["disabled"])
+            self.language_combo.state(["disabled"])
+            self.mic_combo.state(["disabled"])
+            self.timestamps_check.state(["disabled"])
+            self.live_btn.configure(text="Stop live", style="SmallDanger.TButton")
+            self.live_btn.state(["!disabled"])
+        else:
+            self._live_stopping = False
+            self.add_btn.state(["!disabled"])
+            self.model_combo.state(["readonly"])
+            self.language_combo.state(["readonly"])
+            self.mic_combo.state(["readonly"])
+            self.timestamps_check.state(["!disabled"])
+            self.live_btn.configure(
+                text="Live transcription", style="SmallSecondary.TButton"
+            )
+            self.live_btn.state(["!disabled"])
+        self._update_action_button()
+        self._update_transcript_buttons()
+
+    def _live_tick(self) -> None:
+        self._live_timer = None
+        if not self._live_active:
+            return
+        if not self._live_stopping and self._live_device_label:
+            job = (
+                self._jobs_by_id.get(self._live_job_id)
+                if self._live_job_id
+                else None
+            )
+            elapsed = _format_elapsed(time.monotonic() - self._live_started)
+            device = f" on {self._live_device_label}"
+            self._set_status(f"Listening{device} · {elapsed} · speak now", "accent")
+            if job is not None and self._selected_id == job.id:
+                self.transcript_meta_var.set(self._job_detail(job))
+        self._live_timer = self.root.after(1000, self._live_tick)
+
+    def _cancel_live_tick(self) -> None:
+        if self._live_timer is not None:
+            try:
+                self.root.after_cancel(self._live_timer)
+            except tk.TclError:
+                pass
+            self._live_timer = None
+
+    def _load_model_for_live(self, model_key: str):
+        force_cpu = False
+        while True:
+            try:
+                return self.engine.load_model(model_key, force_cpu=force_cpu)
+            except Exception as exc:
+                if not force_cpu and looks_like_gpu_error(exc):
+                    log.exception("GPU model load failed; retrying on CPU")
+                    self.engine.block_gpu()
+                    self.events.put(
+                        ("notice", "GPU unavailable — retrying on the CPU.", "warning")
+                    )
+                    force_cpu = True
+                    continue
+                raise
+
+    def _live_worker(
+        self,
+        model_key: str,
+        language: str | None,
+        device_index: int | None,
+    ) -> None:
+        if self._live_stop is not None and self._live_stop.is_set():
+            self.events.put(("live_done", 0.0, 0, 0.0, "Live microphone", language))
+            return
+        try:
+            self._load_model_for_live(model_key)
+        except Exception as exc:
+            details = traceback.format_exc()
+            log.error("Could not load the model for live transcription\n%s", details)
+            self.events.put(
+                ("live_error", str(exc).strip() or type(exc).__name__, details)
+            )
+            return
+
+        if self._live_stop is not None and self._live_stop.is_set():
+            self.events.put(("live_done", 0.0, 0, 0.0, "Live microphone", language))
+            return
+
+        def emit(kind: str, *payload) -> None:
+            self.events.put((f"live_{kind}", *payload))
+
+        transcriber = LiveTranscriber(
+            self.engine,
+            emit,
+            language=language,
+            device_index=device_index,
+        )
+        try:
+            result = transcriber.run(self._live_stop)
+        except Exception as exc:
+            details = traceback.format_exc()
+            log.error("Live transcription failed\n%s", details)
+            self.events.put(
+                ("live_error", str(exc).strip() or type(exc).__name__, details)
+            )
+            return
+
+        self.events.put(
+            (
+                "live_done",
+                result.elapsed,
+                result.segments,
+                result.captured_seconds,
+                result.device,
+                result.language,
+            )
+        )
+
+    def _on_live_ready(self, device: str, _rate: int, _channels: int) -> None:
+        self._live_device_label = device or "microphone"
+        self._set_badge("LISTENING", "error")
+        self._set_status(
+            f"Listening on {self._live_device_label} · speak now", "accent"
+        )
+        job = self._jobs_by_id.get(self._live_job_id) if self._live_job_id else None
+        if job is not None and self._selected_id == job.id:
+            self.transcript_meta_var.set(self._job_detail(job))
+
+    def _on_live_language(self, code: str | None, _probability: float) -> None:
+        job = self._jobs_by_id.get(self._live_job_id) if self._live_job_id else None
+        if job is None or not code:
+            return
+        job.language = code
+        if self._selected_id == job.id:
+            self.transcript_meta_var.set(self._job_detail(job))
+
+    def _on_live_segment(self, text: str) -> None:
+        job = self._jobs_by_id.get(self._live_job_id) if self._live_job_id else None
+        if job is None:
+            return
+        previous = job.transcript
+        job.transcript = join_transcript(previous, text)
+        job.words = (
+            len(re.findall(r"\S+", job.transcript))
+            if job.transcript.strip()
+            else 0
+        )
+        self._live_partial = ""
+        if self._selected_id == job.id:
+            self._replace_live_partial(job.transcript[len(previous) :])
+            self._refresh_placeholder()
+            self._update_counts()
+            self._update_transcript_buttons()
+        self._refresh_library()
+
+    def _replace_live_partial(self, committed_addition: str) -> None:
+        """Swap the grey preview for newly committed text in the editor."""
+        at_bottom = self.text.yview()[1] >= 0.995
+        state = self.text.cget("state")
+        self.text.configure(state="normal")
+        ranges = self.text.tag_ranges("live_partial")
+        if ranges:
+            self.text.delete(ranges[0], ranges[-1])
+        if committed_addition:
+            self.text.insert("end", committed_addition, "body")
+        self.text.configure(state=state)
+        if at_bottom:
+            self.text.see("end")
+
+    def _insert_live_partial(self, job: AudioJob) -> None:
+        if not self._live_partial:
+            return
+        addition = join_transcript(job.transcript, self._live_partial)[
+            len(job.transcript) :
+        ]
+        if not addition:
+            return
+        state = self.text.cget("state")
+        self.text.configure(state="normal")
+        self.text.insert("end", addition, ("body", "live_partial"))
+        self.text.configure(state=state)
+
+    def _on_live_partial(self, text: str) -> None:
+        self._live_partial = text or ""
+        job = self._jobs_by_id.get(self._live_job_id) if self._live_job_id else None
+        if job is None or self._selected_id != job.id:
+            return
+        at_bottom = self.text.yview()[1] >= 0.995
+        state = self.text.cget("state")
+        self.text.configure(state="normal")
+        ranges = self.text.tag_ranges("live_partial")
+        if ranges:
+            self.text.delete(ranges[0], ranges[-1])
+        if self._live_partial:
+            addition = join_transcript(job.transcript, self._live_partial)[
+                len(job.transcript) :
+            ]
+            if addition:
+                self.text.insert("end", addition, ("body", "live_partial"))
+        self.text.configure(state=state)
+        if at_bottom:
+            self.text.see("end")
+        self._refresh_placeholder()
+        self._update_counts()
+        self._update_transcript_buttons()
+
+    def _on_live_done(
+        self,
+        elapsed: float,
+        _segments: int,
+        captured_seconds: float,
+        _device: str,
+        language: str | None,
+    ) -> None:
+        job = self._jobs_by_id.get(self._live_job_id) if self._live_job_id else None
+        self._cancel_live_tick()
+        self._live_partial = ""
+        self._live_stop = None
+        self._live_thread = None
+        self._set_live(False)
+        self._reset_progress()
+        self._set_badge("ON-DEVICE", "success")
+
+        if job is not None:
+            job.status = "done"
+            job.duration = float(captured_seconds or 0.0) or None
+            job.elapsed = float(elapsed or 0.0)
+            job.completed_at = time.time()
+            if language:
+                job.language = language
+            self._trim_job_transcript(job)
+            if self._selected_id == job.id:
+                self._render_selected()
+                if job.transcript:
+                    self.text.see("end")
+
+        self._refresh_library()
+        self._save_history()
+        self._update_counts()
+        if job is not None and job.transcript.strip():
+            self._set_status(
+                f"Live transcription finished · {job.words:,} words · "
+                f"{_format_elapsed(elapsed)}",
+                "success",
+            )
+        else:
+            self._set_status(
+                "Live transcription finished. No speech was detected.", "warning"
+            )
+        self._live_job_id = None
+
+    def _on_live_error(self, message: str, details: str) -> None:
+        job = self._jobs_by_id.get(self._live_job_id) if self._live_job_id else None
+        self._cancel_live_tick()
+        self._live_partial = ""
+        self._live_stop = None
+        self._live_thread = None
+        self._set_live(False)
+        self._reset_progress()
+        self._set_badge("ON-DEVICE", "error")
+
+        if job is not None:
+            job.status = "error"
+            job.error = message
+            job.completed_at = time.time()
+            job.elapsed = max(0.0, time.monotonic() - self._live_started)
+            self._trim_job_transcript(job)
+            if self._selected_id == job.id:
+                self._render_selected()
+                if job.transcript:
+                    self.text.see("end")
+
+        self._refresh_library()
+        self._save_history()
+        self._update_counts()
+        self._set_status("Live transcription failed.", "error")
+        log.error("Live transcription error:\n%s", details)
+        messagebox.showerror(
+            APP_NAME,
+            f"{message}\n\nThe full details were saved to:\n{LOG_PATH}",
+            parent=self.root,
+        )
+        self._live_job_id = None
+
+    def _finalize_live_on_close(self) -> None:
+        self._cancel_live_tick()
+        if self._live_stop is not None:
+            self._live_stop.set()
+        job = self._jobs_by_id.get(self._live_job_id) if self._live_job_id else None
+        if job is not None and job.status == "running":
+            job.status = "cancelled"
+            job.completed_at = time.time()
+            job.elapsed = max(0.0, time.monotonic() - self._live_started)
+            self._trim_job_transcript(job)
+        self._live_active = False
+        self._live_partial = ""
+        thread = self._live_thread
+        self._live_thread = None
+        if thread is not None:
+            thread.join(timeout=1.5)
+
     # --- Event pump ----------------------------------------------------------
     def _poll_events(self) -> None:
         if self._closing:
@@ -2501,6 +3026,20 @@ class TranscriberApp:
             self._on_batch_cancelled(event[1], event[2], event[3])
         elif kind == "batch_error":
             self._on_batch_error(event[1], event[2])
+        elif kind == "live_ready":
+            self._on_live_ready(event[1], event[2], event[3])
+        elif kind == "live_language":
+            self._on_live_language(event[1], event[2])
+        elif kind == "live_segment":
+            self._on_live_segment(event[1])
+        elif kind == "live_partial":
+            self._on_live_partial(event[1])
+        elif kind == "live_done":
+            self._on_live_done(
+                event[1], event[2], event[3], event[4], event[5]
+            )
+        elif kind == "live_error":
+            self._on_live_error(event[1], event[2])
 
     def _on_file_start(self, job_id: str, index: int, total: int) -> None:
         job = self._jobs_by_id.get(job_id)
@@ -2736,16 +3275,30 @@ class TranscriberApp:
                 return
             if self.cancel_event is not None:
                 self.cancel_event.set()
+        if self._live_active:
+            if not messagebox.askyesno(
+                APP_NAME,
+                "A live transcription is still running.\n\nStop and quit?",
+                parent=self.root,
+            ):
+                return
+            self._finalize_live_on_close()
         self._commit_edit()
         self._save_history()
         self._closing = True
-        for job_id in (self._poll_job, self._copy_reset_job, self._save_job):
+        for job_id in (
+            self._poll_job,
+            self._copy_reset_job,
+            self._save_job,
+            self._live_timer,
+        ):
             if job_id is not None:
                 try:
                     self.root.after_cancel(job_id)
                 except tk.TclError:
                     pass
         self._poll_job = self._copy_reset_job = self._save_job = None
+        self._live_timer = None
         self.root.destroy()
 
 
