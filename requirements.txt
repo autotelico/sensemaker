@@ -1,4 +1,9 @@
-# Core runtime. The PyAV pin matters: newer PyAV releases removed an
-# argument that faster-whisper 1.2.1 still uses.
+# Core runtime for development. The PyAV pin matters: newer PyAV releases
+# removed an argument that faster-whisper 1.2.1 still uses.
+#
+# This file pulls CTranslate2 from PyPI, whose Windows wheel embeds Intel
+# oneMKL/OpenMP and NVIDIA cuDNN. Do NOT use it to build a distributable
+# binary. Release builds install the GPL-compatible wheel built by
+# .github/workflows/ctranslate2-clean.yml before requirements-lock.txt.
 faster-whisper==1.2.1
 av==16.0.1

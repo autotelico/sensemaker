@@ -1,12 +1,16 @@
 # Exact runtime dependency lock for Python 3.14 on Windows.
 # Used for reproducible release builds. The optional NVIDIA cuBLAS runtime is
 # installed separately via requirements-gpu.txt.
+#
+# CTranslate2 is intentionally not listed. Release builds install the
+# GPL-compatible wheel built by .github/workflows/ctranslate2-clean.yml (see
+# packaging/build_ctranslate2_clean.ps1) before this file. The PyPI wheel
+# embeds Intel oneMKL/OpenMP and NVIDIA cuDNN, which are not GPL-compatible.
 PyYAML==6.0.3 --hash=sha256:4a2e8cebe2ff6ab7d1050ecd59c25d4c8bd7e6f400f5f82b96557ac0abafd0ac
 anyio==4.16.0 --hash=sha256:c66ae634e0b8228396b801741beb3294326d4b6102f7bba4041c0dfb58c29026
 av==16.0.1 --hash=sha256:92101f49082392580c9dba4ba2fe5b931b3bb0fb75a1a848bfb9a11ded68be91
 click==8.5.1 --hash=sha256:8bb5376d2006950386f8c6427613334a2acadc5f559cb80e638d00b4df957e37
 colorama==0.4.6 --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
-ctranslate2==4.8.5 --hash=sha256:1a3124eaedea2cea8bc2d8d12f9bae61c9cf1ce96bff37a2a7e4abbb40d5289b
 faster-whisper==1.2.1 --hash=sha256:79a66ad50688c0b794dd501dc340a736992a6342f7f95e5811be60b5224a26a7
 filelock==4.2.9 --hash=sha256:a379c50a729e5b68c8519a4d26489f755d9769960a236ecd838190e2a78db2e9
 flatbuffers==25.12.19 --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4

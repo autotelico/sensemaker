@@ -7,7 +7,13 @@ on:
       - 'v*'
 
 jobs:
+  ctranslate2:
+    uses: ./.github/workflows/ctranslate2-clean.yml
+    permissions:
+      contents: read
+
   build:
+    needs: ctranslate2
     runs-on: windows-latest
     permissions:
       contents: read
@@ -29,12 +35,37 @@ jobs:
         shell: pwsh
         run: choco install innosetup --version=6.7.1 --yes --no-progress
 
+      - name: Download clean CTranslate2 wheel
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ctranslate2-clean-cp314-win_amd64
+          path: ctranslate2-wheel
+
       - name: Create virtual environment and install dependencies
         shell: pwsh
         run: |
           python -m venv .venv
+          $wheel = Get-ChildItem 'ctranslate2-wheel\*.whl' | Select-Object -First 1
+          if (-not $wheel) { throw 'Clean CTranslate2 wheel not found in the build artifact.' }
+          .\.venv\Scripts\python.exe -m pip install --no-deps $wheel.FullName
           .\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-lock.txt
           .\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-build.txt
+          .\.venv\Scripts\python.exe -m pip check
+
+      - name: Verify clean CTranslate2 install
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pkg = .\.venv\Scripts\python.exe -c "import ctranslate2, pathlib; print(pathlib.Path(ctranslate2.__file__).resolve().parent)"
+          $pkg = ($pkg | Select-Object -Last 1)
+          if ($pkg) { $pkg = $pkg.Trim() }
+          if (-not $pkg -or -not (Test-Path $pkg)) { throw "CTranslate2 package not found at $pkg" }
+          $bad = Get-ChildItem $pkg -Recurse -File |
+            Where-Object { $_.Name -match '^(cudnn|cublas|cublaslt|cudart|nvrtc|mkl|libiomp|iomp5).*\.dll$' }
+          if ($bad) { throw "Forbidden DLLs in the clean wheel: $($bad.Name -join ', ')" }
+          if (-not (Test-Path (Join-Path $pkg 'dnnl.dll'))) { throw 'dnnl.dll is missing from the clean wheel.' }
+          if (-not (Test-Path (Join-Path $pkg 'tbb12.dll'))) { throw 'tbb12.dll is missing from the clean wheel.' }
+          .\.venv\Scripts\python.exe -c "import ctranslate2; print('CTranslate2', ctranslate2.__version__, sorted(ctranslate2.get_supported_compute_types('cpu')))"
 
       - name: Run security regression tests
         shell: pwsh
@@ -51,7 +82,7 @@ jobs:
         run: |
           $paths = @(
             'dist\SenseMaker\SenseMaker.exe',
-            'dist\SenseMaker-Setup-1.0.0.exe'
+            'dist\SenseMaker-Setup-1.1.0.exe'
           )
           foreach ($path in $paths) {
             if (-not (Test-Path $path)) { throw "Missing build artifact: $path" }

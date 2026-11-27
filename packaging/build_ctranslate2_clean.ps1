@@ -5,7 +5,7 @@
 # with:
 #
 #   * oneDNN (Apache-2.0) instead of Intel MKL
-#   * oneTBB (Apache-2.0, linked statically into dnnl.dll) instead of OpenMP
+#   * oneTBB (Apache-2.0, shipped as tbb12.dll) for oneDNN threading
 #   * no cuDNN
 #   * CUDA dynamic loading, so no NVIDIA DLLs are bundled or linked at load time
 #
@@ -169,7 +169,7 @@ Invoke-Step -Name 'Configure oneTBB' -Action {
         -DCMAKE_BUILD_TYPE=Release `
         "-DCMAKE_INSTALL_PREFIX=$TbbInstall" `
         -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL `
-        -DBUILD_SHARED_LIBS=OFF `
+        -DBUILD_SHARED_LIBS=ON `
         -DTBB_TEST=OFF `
         -DTBB_EXAMPLES=OFF `
         -DTBB_STRICT=OFF `
@@ -258,12 +258,15 @@ Invoke-Step -Name 'Install CTranslate2' -Action {
 
 $Ct2Dll = Join-Path $Ct2Install 'bin\ctranslate2.dll'
 $DnnlDll = Join-Path $OneDnnInstall 'bin\dnnl.dll'
+$TbbDll = Join-Path $TbbInstall 'bin\tbb12.dll'
 if (-not (Test-Path $Ct2Dll)) { throw "ctranslate2.dll not found at $Ct2Dll" }
 if (-not (Test-Path $DnnlDll)) { throw "dnnl.dll not found at $DnnlDll" }
+if (-not (Test-Path $TbbDll)) { throw "tbb12.dll not found at $TbbDll" }
 
 $PythonPackage = Join-Path $CT2Source 'python\ctranslate2'
 Copy-Item -Force $Ct2Dll (Join-Path $PythonPackage 'ctranslate2.dll')
 Copy-Item -Force $DnnlDll (Join-Path $PythonPackage 'dnnl.dll')
+Copy-Item -Force $TbbDll (Join-Path $PythonPackage 'tbb12.dll')
 
 # ----- Python wheel ---------------------------------------------------------
 Invoke-Step -Name 'Install wheel build tools' -Action {

@@ -9,20 +9,21 @@ local Ollama model when one is available, to transcribe audio files and live
 microphone speech; audio is processed locally and is never uploaded. It is free
 software under [GPL-3.0-or-later](LICENSE).
 
-> **Release status:** the source is GPL-3.0-or-later, but no compliant binary is
-> published yet. The current CTranslate2 wheel embeds proprietary Intel
-> oneMKL/OpenMP and NVIDIA cuDNN, so the installer must not be distributed until
-> the engine is rebuilt. See `RELEASE.md`.
+> **Release status:** the source is GPL-3.0-or-later. Since 1.1.0 the release
+> build uses a GPL-compatible CTranslate2 wheel (oneDNN/oneTBB, no Intel
+> oneMKL/OpenMP, no NVIDIA cuDNN) and bundles no NVIDIA runtime. See
+> `RELEASE.md` and `THIRD_PARTY_NOTICES.md`. Builds are unsigned until a
+> certificate is supplied.
 
 ![SenseMaker demo](demo/SenseMaker-demo-poster.png)
 
 ## Download
 
-No binary release is published yet. When a compliant build is available it will
-appear on the [Releases page](https://github.com/autotelico/sensemaker/releases).
-Builds will be unsigned unless a certificate is supplied, so Windows SmartScreen
-may warn that the publisher is unrecognized; verify downloads against
-`SHA256SUMS.txt`.
+No binary release is published yet. 1.1.0 is the first build produced without
+the proprietary CTranslate2 runtime; when published it will appear on the
+[Releases page](https://github.com/autotelico/sensemaker/releases). Builds are
+unsigned unless a certificate is supplied, so Windows SmartScreen may warn that
+the publisher is unrecognized; verify downloads against `SHA256SUMS.txt`.
 
 Building from source is described below.
 
@@ -33,13 +34,13 @@ SenseMaker is installed as a normal per-user Windows application:
 - **Start Menu:** `SenseMaker` folder (app, privacy notice, uninstall)
 - **Desktop:** `SenseMaker` shortcut
 - **Install location:** `%LOCALAPPDATA%\Programs\SenseMaker`
-- **Installer:** `dist\SenseMaker-Setup-1.0.0.exe`
+- **Installer:** `dist\SenseMaker-Setup-1.1.0.exe`
 - **Uninstall:** Settings → Apps → Installed apps → SenseMaker
 
-The installer is CPU-only. SenseMaker uses an NVIDIA GPU automatically when a
-CUDA runtime is already installed on the machine. The current CTranslate2 wheel
-still embeds proprietary NVIDIA/Intel components, so this build is not yet
-distributable; see [GPU acceleration](#gpu-acceleration) and `RELEASE.md`.
+The installer bundles no NVIDIA runtime. SenseMaker uses an NVIDIA GPU
+automatically when a compatible cuBLAS runtime is installed separately on the
+machine; CUDA is loaded at runtime and is not a hard dependency. See
+[GPU acceleration](#gpu-acceleration) and `RELEASE.md`.
 
 Installed app data lives in `%LOCALAPPDATA%\SenseMaker`:
 
@@ -208,6 +209,11 @@ Use a clean virtual environment for release builds:
 
 ```powershell
 py -3.14 -m venv .venv
+
+# Install the GPL-compatible CTranslate2 wheel first. CI builds it in
+# .github/workflows/ctranslate2-clean.yml; download that artifact, or build it
+# locally with packaging\build_ctranslate2_clean.ps1.
+.venv\Scripts\python.exe -m pip install --no-deps C:\path\to\ctranslate2-4.8.5-cp314-cp314-win_amd64.whl
 .venv\Scripts\python.exe -m pip install --require-hashes -r requirements-lock.txt
 .venv\Scripts\python.exe -m pip install --require-hashes -r requirements-build.txt
 .venv\Scripts\python.exe -m unittest discover -s tests -v
@@ -215,12 +221,26 @@ winget install JRSoftware.InnoSetup
 powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 ```
 
+The clean wheel is built from CTranslate2 source in
+`.github/workflows/ctranslate2-clean.yml`. To build it locally you need MSVC 2022,
+CMake, Ninja, and optionally the CUDA Toolkit 12.x:
+
+```powershell
+git clone --recursive --branch v4.8.5 https://github.com/OpenNMT/CTranslate2.git C:\src\CTranslate2
+powershell -ExecutionPolicy Bypass -File packaging\build_ctranslate2_clean.ps1 `
+  -CT2Source C:\src\CTranslate2 `
+  -WorkDir C:\build\ctranslate2 `
+  -OutputDir C:\build\wheels
+```
+
 The build script:
 
+- refuses to build with the PyPI CTranslate2 wheel (it embeds Intel
+  oneMKL/OpenMP and NVIDIA cuDNN);
 - validates that no plaintext history or logs are in the project root;
 - regenerates icons and wizard artwork;
 - builds the standalone app in `dist\SenseMaker`;
-- compiles `dist\SenseMaker-Setup-1.0.0.exe` with Inno Setup;
+- compiles `dist\SenseMaker-Setup-1.1.0.exe` with Inno Setup;
 - writes `dist\SHA256SUMS.txt` and `dist\release.json`.
 
 To sign the executable and installer, pass a code-signing certificate to the
@@ -233,8 +253,8 @@ powershell -ExecutionPolicy Bypass -File packaging\build.ps1 `
 ```
 
 The app and installer are **unsigned until a certificate is supplied**. See
-`RELEASE.md` for the publication checklist and outstanding blockers, including
-the proprietary CTranslate2 runtime.
+`RELEASE.md` for the publication checklist, the clean CTranslate2 build, and the
+remaining legal-review items.
 
 Rebuilding just the installer while keeping the existing app build:
 
@@ -256,11 +276,11 @@ load a model that is missing from the manifest or fails verification.
 
 ## GPU acceleration
 
-A GPL-compliant CPU build will not bundle NVIDIA's proprietary runtime. To use a
-GPU, install a CUDA runtime separately — for example the NVIDIA CUDA Toolkit, or
-the `nvidia-cublas-cu12` and `nvidia-cuda-nvrtc-cu12` packages when running from
-source. The current build is not GPL-compliant because CTranslate2 embeds Intel
-oneMKL/OpenMP and NVIDIA cuDNN; see `RELEASE.md`. SenseMaker looks for cuBLAS in:
+The installer bundles no NVIDIA runtime. To use a GPU, install a compatible
+cuBLAS runtime separately — for example the NVIDIA CUDA Toolkit, or the
+`nvidia-cublas-cu12` and `nvidia-cuda-nvrtc-cu12` packages when running from
+source. The 1.1.0 build uses CUDA dynamic loading, so no NVIDIA binaries are
+distributed with SenseMaker; see `RELEASE.md`. SenseMaker looks for cuBLAS in:
 
 - `SENSEMAKER_GPU_DIR`
 - `gpu\cublas\bin` next to the executable

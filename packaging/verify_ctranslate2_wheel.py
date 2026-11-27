@@ -8,7 +8,8 @@ SenseMaker ships a wheel rebuilt from CTranslate2 source with:
   * WITH_CUDNN=OFF     (no NVIDIA cuDNN)
   * CUDA_DYNAMIC_LOADING=ON (no NVIDIA libraries bundled; loaded at runtime)
 
-This script fails if any of those libraries reappear in the wheel.
+oneTBB (Apache-2.0) is expected and shipped as ``tbb12.dll``. This script fails
+if any of the proprietary libraries above reappear in the wheel.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import zipfile
 from pathlib import Path
 
 FORBIDDEN_NAME = re.compile(
-    r"^(cudnn|cublas|cublaslt|cudart|nvrtc|iomp5|libiomp|mkl|tbb)", re.IGNORECASE
+    r"^(cudnn|cublas|cublaslt|cudart|nvrtc|iomp5|libiomp|mkl)", re.IGNORECASE
 )
 FORBIDDEN_STRINGS = (
     b"oneMKL",
@@ -31,6 +32,7 @@ FORBIDDEN_STRINGS = (
 EXPECTED_FILES = (
     "ctranslate2/ctranslate2.dll",
     "ctranslate2/dnnl.dll",
+    "ctranslate2/tbb12.dll",
 )
 
 
@@ -128,7 +130,10 @@ def main(argv: list[str]) -> int:
 
     print(f"OK: {wheel.name}")
     print(f"SHA256: {_sha256(wheel)}")
-    print("No Intel MKL/OpenMP, NVIDIA cuDNN/cuBLAS, or TBB binaries are bundled.")
+    print(
+        "No Intel MKL/OpenMP or NVIDIA cuDNN/cuBLAS binaries are bundled; "
+        "oneTBB is included under Apache-2.0."
+    )
     return 0
 
 

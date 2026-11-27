@@ -1,9 +1,6 @@
-# SenseMaker 1.0.0
+# SenseMaker 1.1.0
 
 Private, on-device audio transcription for Windows 10/11 (x64).
-
-> **Not releasable yet.** The current CTranslate2 wheel embeds proprietary Intel
-> oneMKL/OpenMP and NVIDIA cuDNN. Do not publish this build; see `RELEASE.md`.
 
 ## Highlights
 
@@ -20,9 +17,26 @@ Private, on-device audio transcription for Windows 10/11 (x64).
 - Optional DPAPI-encrypted transcript history for files and library live
   sessions; popup dictations are never saved.
 
+## Licensing and distribution
+
+This release rebuilds CTranslate2 from source with the GPL-compatible
+configuration used by SenseMaker:
+
+- oneDNN (Apache-2.0) instead of Intel MKL;
+- oneTBB (Apache-2.0) for oneDNN threading, with no Intel OpenMP;
+- no NVIDIA cuDNN;
+- CUDA loaded dynamically at runtime, with no NVIDIA binaries bundled.
+
+The installer therefore does not include Intel oneMKL/OpenMP or NVIDIA
+cuDNN/cuBLAS. The optional GPU runtime is installed separately by the user and
+is not distributed with SenseMaker. Consult `THIRD_PARTY_NOTICES.md`,
+`THIRD_PARTY_SOURCE.md`, and `RELEASE.md` for the full inventory and
+corresponding-source information. This is an inventory and compliance aid, not
+legal advice.
+
 ## Download
 
-- `SenseMaker-Setup-1.0.0.exe` — per-user installer
+- `SenseMaker-Setup-1.1.0.exe` — per-user installer
 - `SHA256SUMS.txt` — verify the download
 - `release.json` — machine-readable release metadata
 
@@ -51,20 +65,21 @@ that the publisher is unrecognized. You can verify the download against
 
 ## GPU acceleration (optional)
 
-A compliant build will be CPU-only unless the engine is replaced. The current
-CTranslate2 wheel embeds proprietary NVIDIA/Intel components and is not
-distributable; see `RELEASE.md`.
+The installer bundles no NVIDIA runtime. SenseMaker uses an NVIDIA GPU when a
+compatible cuBLAS runtime is installed separately on the machine; CUDA is loaded
+at runtime and is not a hard dependency. See the GPU section of `README.md` for
+the directories SenseMaker searches. Without a runtime it uses the CPU.
 
 ## License
 
 SenseMaker is free software licensed under the GNU General Public License,
 version 3 or later. The bundled FFmpeg libraries and their x264/x265 codecs are
-GPL-2.0-or-later; a compliant Windows build will be distributed under
-GPL-3.0-or-later. See `LICENSE`, `THIRD_PARTY_NOTICES.md`, and
-`THIRD_PARTY_SOURCE.md`.
+GPL-2.0-or-later; the Windows build is distributed under GPL-3.0-or-later. See
+`LICENSE`, `THIRD_PARTY_NOTICES.md`, and `THIRD_PARTY_SOURCE.md`.
 
 ## Known limitations
 
 - No automatic updater yet.
 - No code signing yet.
 - Model downloads are large; the default Small model is about 480 MB.
+- GPU support requires a separately installed NVIDIA cuBLAS runtime.

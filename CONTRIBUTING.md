@@ -14,11 +14,16 @@ py -3.14 -m venv .venv
 .venv\Scripts\python.exe app.pyw
 ```
 
-For the full pinned build environment:
+`requirements.txt` pulls the PyPI CTranslate2 wheel, which is fine for local
+development but not for a distributable build.
+
+For the full pinned release environment, install the clean CTranslate2 wheel
+first (see `RELEASE.md`), then the lock:
 
 ```powershell
-.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
-.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+.venv\Scripts\python.exe -m pip install --no-deps C:\path\to\ctranslate2-4.8.5-cp314-cp314-win_amd64.whl
+.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-lock.txt
+.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-build.txt
 ```
 
 ## Guidelines

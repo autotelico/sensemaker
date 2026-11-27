@@ -35,22 +35,31 @@ particular SenseMaker release, open an issue at
 https://github.com/autotelico/sensemaker/issues and we will provide it. This
 offer is valid for three years from the date the release was published.
 
-## Proprietary components in the current build
+## CTranslate2, oneDNN, and oneTBB
 
-The current CTranslate2 4.8.5 Windows wheel embeds Intel oneMKL and Intel
-OpenMP and bundles NVIDIA cuDNN. These are not GPL-compatible and are not part
-of a compliant SenseMaker distribution. Do not release the current binary;
-rebuild CTranslate2 without them (see `RELEASE.md`) and exclude cuDNN. The
-NVIDIA cuBLAS license in `licenses/` is retained for reference only. See
-`THIRD_PARTY_NOTICES.md`.
+SenseMaker 1.1.0 links a CTranslate2 build that contains no Intel MKL/OpenMP or
+NVIDIA cuDNN/cuBLAS binaries. The exact upstream sources are:
+
+| Component | Version | Source |
+| --- | --- | --- |
+| CTranslate2 | 4.8.5 (`7f59ae114cba0f7d5fb1fe6099142e4c3b0037c8`) | https://github.com/OpenNMT/CTranslate2 |
+| oneDNN | 3.1.1 | https://github.com/oneapi-src/oneDNN/releases/tag/v3.1.1 |
+| oneTBB | 2021.11.0 | https://github.com/uxlfoundation/oneTBB/releases/tag/v2021.11.0 |
+
+The build configuration is reproducible from
+`.github/workflows/ctranslate2-clean.yml` and
+`packaging/build_ctranslate2_clean.ps1`. It uses `WITH_MKL=OFF`,
+`OPENMP_RUNTIME=NONE`, `WITH_CUDNN=OFF`, and `CUDA_DYNAMIC_LOADING=ON`.
+oneTBB is shipped as `tbb12.dll`. NVIDIA cuBLAS is not bundled; users who want
+GPU acceleration install it themselves, and CTranslate2 loads it at runtime.
+The NVIDIA cuBLAS license in `licenses/` is retained for reference only.
 
 ## Other components
 
-Licenses for Python, PyInstaller, CTranslate2, faster-whisper, ONNX Runtime,
-NumPy, Tcl/Tk, and the other dependencies are in the `licenses` folder. Their
-project licenses are GPL-compatible as listed; the CTranslate2 binary must be
-rebuilt without its proprietary runtime components before distribution. Consult
-the upstream projects for source code.
+Licenses for Python, PyInstaller, CTranslate2, faster-whisper, oneDNN, oneTBB,
+ONNX Runtime, NumPy, Tcl/Tk, and the other dependencies are in the `licenses`
+folder. Their project licenses are GPL-compatible as listed. Consult the
+upstream projects for source code.
 
 This document is an inventory and compliance aid, not legal advice. If you
 redistribute SenseMaker or a modified build, review the obligations of
