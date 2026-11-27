@@ -130,6 +130,9 @@ if (-not $CpuOnly) {
     if ([string]::IsNullOrWhiteSpace($CudaRoot)) {
         $CudaRoot = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8'
     }
+    # CMake interprets backslashes as escapes in cache strings; FindCUDA fails
+    # on paths like C:\Program Files. Use forward slashes for the CMake args.
+    $CudaRoot = $CudaRoot.Replace('\', '/')
     $nvcc = Join-Path $CudaRoot 'bin\nvcc.exe'
     if (-not (Test-Path $nvcc)) {
         throw "nvcc not found at $nvcc. Install the CUDA Toolkit 12.x or pass -CpuOnly."
