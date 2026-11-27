@@ -214,6 +214,7 @@ Invoke-Step -Name 'Configure oneDNN' -Action {
         -DDNNL_LIBRARY_TYPE=SHARED `
         -DDNNL_BUILD_EXAMPLES=OFF `
         -DDNNL_BUILD_TESTS=OFF `
+        -DONEDNN_BUILD_GRAPH=OFF `
         -DDNNL_ENABLE_WORKLOAD=INFERENCE `
         -DDNNL_CPU_RUNTIME=TBB
 }
