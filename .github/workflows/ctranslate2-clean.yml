@@ -1,0 +1,79 @@
+name: Build license-clean CTranslate2
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    outputs:
+      wheel_artifact:
+        description: Artifact containing the clean CTranslate2 wheel
+        value: ${{ jobs.build.outputs.wheel_artifact }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    outputs:
+      wheel_artifact: ctranslate2-clean-cp314-win_amd64
+
+    steps:
+      - name: Check out SenseMaker build scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out CTranslate2 v4.8.5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: OpenNMT/CTranslate2
+          ref: 7f59ae114cba0f7d5fb1fe6099142e4c3b0037c8
+          submodules: recursive
+          path: .ct2-source
+          persist-credentials: false
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+
+      - name: Install CUDA Toolkit 12.8 (build-time only)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://developer.download.nvidia.com/compute/cuda/12.8.1/local_installers/cuda_12.8.1_572.61_windows.exe'
+          $installer = Join-Path $env:RUNNER_TEMP 'cuda_installer.exe'
+          curl.exe -L --fail --retry 3 --silent --show-error -o $installer $url
+          if ($LASTEXITCODE -ne 0) { throw 'CUDA installer download failed' }
+          Start-Process -FilePath $installer `
+            -ArgumentList '-s','nvcc_12.8','cudart_12.8','cublas_dev_12.8','curand_dev_12.8' `
+            -Wait -NoNewWindow
+          $cuda = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8'
+          for ($i = 0; $i -lt 60 -and -not (Test-Path (Join-Path $cuda 'bin\nvcc.exe')); $i++) {
+            Start-Sleep -Seconds 10
+          }
+          if (-not (Test-Path (Join-Path $cuda 'bin\nvcc.exe'))) {
+            throw 'CUDA Toolkit installation did not complete'
+          }
+          "CUDA_PATH=$cuda" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PATH=$cuda\bin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Remove-Item -Force $installer
+
+      - name: Build clean CTranslate2 wheel
+        shell: pwsh
+        run: |
+          .\packaging\build_ctranslate2_clean.ps1 `
+            -CT2Source (Resolve-Path .\.ct2-source) `
+            -WorkDir (Join-Path $env:RUNNER_TEMP 'ctranslate2-build') `
+            -OutputDir (Join-Path $env:GITHUB_WORKSPACE 'wheelhouse')
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ctranslate2-clean-cp314-win_amd64
+          path: |
+            wheelhouse/ctranslate2-*.whl
+            wheelhouse/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
