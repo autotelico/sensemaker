@@ -55,7 +55,7 @@ $Ct2DllInEnv = Join-Path $Ct2Package 'ctranslate2.dll'
 if (Test-Path $Ct2DllInEnv) {
     $ct2Bytes = [IO.File]::ReadAllBytes($Ct2DllInEnv)
     $ct2Ascii = [Text.Encoding]::ASCII.GetString($ct2Bytes)
-    if ($ct2Ascii.Contains('oneMKL') -or $ct2Ascii.Contains('CT2_USE_MKL')) {
+    if ($ct2Ascii.Contains('oneMKL')) {
         throw 'Refusing to build: the installed ctranslate2.dll statically contains Intel oneMKL. Install the clean wheel from .github/workflows/ctranslate2-clean.yml instead.'
     }
 }
@@ -119,7 +119,7 @@ foreach ($binary in $Ct2Binaries) {
     if (Test-Path $binary) {
         $bytes = [IO.File]::ReadAllBytes($binary)
         $ascii = [Text.Encoding]::ASCII.GetString($bytes)
-        if ($ascii.Contains('oneMKL') -or $ascii.Contains('CT2_USE_MKL')) {
+        if ($ascii.Contains('oneMKL')) {
             throw "Refusing to build: $binary contains Intel oneMKL. See RELEASE.md."
         }
     }

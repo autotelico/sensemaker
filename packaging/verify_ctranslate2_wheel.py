@@ -23,9 +23,10 @@ from pathlib import Path
 FORBIDDEN_NAME = re.compile(
     r"^(cudnn|cublas|cublaslt|cudart|nvrtc|iomp5|libiomp|mkl)", re.IGNORECASE
 )
+# "CT2_USE_MKL" is only the name of a runtime environment variable and is present
+# in every CTranslate2 build, so it is not a marker of linked MKL code.
 FORBIDDEN_STRINGS = (
     b"oneMKL",
-    b"CT2_USE_MKL",
     b"libiomp5md",
     b"Intel(R) Math Kernel",
 )
