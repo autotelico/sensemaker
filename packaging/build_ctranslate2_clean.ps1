@@ -197,10 +197,12 @@ if ($LASTEXITCODE -ne 0) { throw 'Failed to extract oneDNN' }
 
 # oneDNN 3.1.1 ships a cmake/win/TBBConfig.cmake wrapper for Intel oneAPI's TBB
 # layout (TBBROOT/lib/intel64/vc14). It shadows our oneTBB package and treats
-# TBB as a shared library. Remove it so find_package() uses the oneTBB config.
+# TBB as a shared library. Hide it during configuration so find_package() uses
+# the oneTBB config; it is restored below because oneDNN's install rules copy it.
 $OneDnnTbbWrapper = Join-Path $TbbSource "oneDNN-$OneDnnVersion\cmake\win"
+$OneDnnTbbWrapperDisabled = Join-Path $TbbSource "oneDNN-$OneDnnVersion\cmake\win.disabled"
 if (Test-Path $OneDnnTbbWrapper) {
-    Remove-Item -Recurse -Force $OneDnnTbbWrapper
+    Rename-Item -Path $OneDnnTbbWrapper -NewName 'win.disabled'
 }
 
 Reset-BuildDirectory -Path $OneDnnBuild
@@ -222,6 +224,9 @@ Invoke-Step -Name 'Configure oneDNN' -Action {
 }
 Invoke-Step -Name 'Build oneDNN' -Action {
     & cmake --build $OneDnnBuild --parallel $Parallel
+}
+if (Test-Path $OneDnnTbbWrapperDisabled) {
+    Rename-Item -Path $OneDnnTbbWrapperDisabled -NewName 'win'
 }
 Invoke-Step -Name 'Install oneDNN' -Action {
     & cmake --install $OneDnnBuild
