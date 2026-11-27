@@ -1,6 +1,11 @@
 name: Build license-clean CTranslate2
 
 on:
+  push:
+    paths:
+      - '.github/workflows/ctranslate2-clean.yml'
+      - 'packaging/build_ctranslate2_clean.ps1'
+      - 'packaging/verify_ctranslate2_wheel.py'
   workflow_dispatch:
   workflow_call:
     outputs:
