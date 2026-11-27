@@ -189,6 +189,7 @@ $OneDnnSha256 = 'd1cd58f57b2308d362a9bc474acbc21524cb879cf5d8779b460c718f0fac82d
 $OneDnnArchive = Join-Path $WorkDir "oneDNN-$OneDnnVersion.tar.gz"
 $OneDnnBuild = Join-Path $WorkDir 'onednn-build'
 $OneDnnInstall = Join-Path $WorkDir 'onednn-install'
+$TbbLibDir = (Join-Path $TbbInstall 'lib').Replace('\', '/')
 
 Get-VerifiedArchive -Url $OneDnnUrl -Destination $OneDnnArchive -Sha256 $OneDnnSha256
 & tar.exe -xzf $OneDnnArchive -C $TbbSource
@@ -211,6 +212,7 @@ Invoke-Step -Name 'Configure oneDNN' -Action {
         -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL `
         "-DCMAKE_PREFIX_PATH=$TbbInstall" `
         "-DTBB_DIR=$TbbDir" `
+        "-DCMAKE_SHARED_LINKER_FLAGS=/LIBPATH:$TbbLibDir" `
         -DDNNL_LIBRARY_TYPE=SHARED `
         -DDNNL_BUILD_EXAMPLES=OFF `
         -DDNNL_BUILD_TESTS=OFF `
