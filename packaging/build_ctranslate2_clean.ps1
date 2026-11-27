@@ -167,7 +167,8 @@ Reset-BuildDirectory -Path $TbbInstall
 Invoke-Step -Name 'Configure oneTBB' -Action {
     & cmake -S (Join-Path $TbbSource "oneTBB-$TbbVersion") -B $TbbBuild -G Ninja `
         -DCMAKE_BUILD_TYPE=Release `
-        -DCMAKE_INSTALL_PREFIX=$TbbInstall `
+        "-DCMAKE_INSTALL_PREFIX=$TbbInstall" `
+        -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL `
         -DBUILD_SHARED_LIBS=OFF `
         -DTBB_TEST=OFF `
         -DTBB_EXAMPLES=OFF `
@@ -193,13 +194,22 @@ Get-VerifiedArchive -Url $OneDnnUrl -Destination $OneDnnArchive -Sha256 $OneDnnS
 & tar.exe -xzf $OneDnnArchive -C $TbbSource
 if ($LASTEXITCODE -ne 0) { throw 'Failed to extract oneDNN' }
 
+# oneDNN 3.1.1 ships a cmake/win/TBBConfig.cmake wrapper for Intel oneAPI's TBB
+# layout (TBBROOT/lib/intel64/vc14). It shadows our oneTBB package and treats
+# TBB as a shared library. Remove it so find_package() uses the oneTBB config.
+$OneDnnTbbWrapper = Join-Path $TbbSource "oneDNN-$OneDnnVersion\cmake\win"
+if (Test-Path $OneDnnTbbWrapper) {
+    Remove-Item -Recurse -Force $OneDnnTbbWrapper
+}
+
 Reset-BuildDirectory -Path $OneDnnBuild
 Reset-BuildDirectory -Path $OneDnnInstall
 Invoke-Step -Name 'Configure oneDNN' -Action {
     & cmake -S (Join-Path $TbbSource "oneDNN-$OneDnnVersion") -B $OneDnnBuild -G Ninja `
         -DCMAKE_BUILD_TYPE=Release `
-        -DCMAKE_INSTALL_PREFIX=$OneDnnInstall `
-        -DCMAKE_PREFIX_PATH=$TbbInstall `
+        "-DCMAKE_INSTALL_PREFIX=$OneDnnInstall" `
+        -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL `
+        "-DCMAKE_PREFIX_PATH=$TbbInstall" `
         "-DTBB_DIR=$TbbDir" `
         -DDNNL_LIBRARY_TYPE=SHARED `
         -DDNNL_BUILD_EXAMPLES=OFF `
@@ -222,6 +232,7 @@ $Ct2ConfigureArgs = @(
     '-B', $Ct2Build,
     '-G', 'Ninja',
     '-DCMAKE_BUILD_TYPE=Release',
+    '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL',
     "-DCMAKE_INSTALL_PREFIX=$Ct2Install",
     "-DCMAKE_PREFIX_PATH=$OneDnnInstall;$TbbInstall",
     '-DBUILD_CLI=OFF',
@@ -259,6 +270,7 @@ Invoke-Step -Name 'Install wheel build tools' -Action {
 }
 Invoke-Step -Name 'Build Python wheel' -Action {
     $env:CTRANSLATE2_ROOT = $Ct2Install
+    $env:CMAKE_BUILD_PARALLEL_LEVEL = $Parallel
     & $Python -m pip wheel (Join-Path $CT2Source 'python') --no-deps --wheel-dir $OutputDir
 }
 
@@ -272,6 +284,12 @@ Invoke-Step -Name 'Verify wheel contents' -Action {
 }
 
 if (-not $SkipSmokeTest) {
+    # Simulate a CPU-only machine: no CUDA toolkit on PATH or in CUDA_PATH.
+    Remove-Item Env:CUDA_PATH -ErrorAction SilentlyContinue
+    $env:PATH = (($env:PATH -split ';') | Where-Object {
+        $_ -and $_ -notmatch 'NVIDIA GPU Computing Toolkit' -and $_ -notmatch '\\CUDA\\'
+    }) -join ';'
+
     $SmokeVenv = Join-Path $WorkDir 'smoke-venv'
     if (Test-Path $SmokeVenv) { Remove-Item -Recurse -Force $SmokeVenv }
     Invoke-Step -Name 'Create smoke-test environment' -Action {
